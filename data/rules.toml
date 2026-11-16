@@ -1,0 +1,418 @@
+# gift-check rules. Facts about stores live here, not in the code. Every rule has a `source` and
+# an `as_of` date; "TODO" means not confirmed yet (the window shows how many are left).
+#
+# Most Pandora facts below come from the research report
+#   ~/.claude/gift-scout/research/2026-11-15-pandora-buying-guide.md   (cited as "guide §N")
+# which read Pandora's own pages through search-engine snippets (pandora.net answers 403 to
+# plain fetches). Confidence marks from the report are kept: [official], [retailer], [3rd].
+#
+# Matching: `name_words` etc. match whole words, ignoring case; a trailing s/es on the product's
+# word still counts. `id_prefix` matches the start of the product id; `?` is any one character.
+# Kind and system rules: store-specific rules are tried before `store = "*"` ones, in file order,
+# and the first match wins. A kind the store's own data states always wins over these rules.
+# Edit this file and the products are re-classified the next time gift-check starts.
+
+[meta]
+version = 1
+about = "Kinds, metals, compatibility systems, sizing and policies for gift-check."
+
+# ---------------------------------------------------------------- kinds: Pandora (US)
+
+[[kind]]
+store = "pandora-us"
+kind = "safety-chain"
+name_words = ["Safety Chain"]
+note = "Before clip: safety chains are often named \"... Safety Chain Clip Charm\"."
+source = "guide §1 (Clips, spacers, safety chains): Pandora bracelet guide, https://us.pandora.net/charms/band-of-hearts-safety-chain-charm/791088.html [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "spacer"
+name_words = ["Spacer"]
+source = "guide §1: Pandora product listings via search snippet; https://www.apartstyle.com/post/pandora-clips-vs-spacers [3rd]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "clip"
+name_words = ["Clip"]
+source = "guide §1: Pandora bracelet guide and Clear Pave Clip Charm listing [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "bracelet"
+name_words = ["Bracelet", "Bangle"]
+source = "guide §1 table (Moments snake chain, bangles, slider, leather; ME link chain; Reflexions mesh) [official]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "gift-set"
+name_words = ["Gift Set"]
+source = "guide §5 (Pandora sells boxed gift sets) [3rd: Rakuten listing 2026-11-15]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "necklace"
+name_words = ["Necklace", "Collier"]
+source = "pattern on Pandora product names (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "earring"
+name_words = ["Earring"]
+source = "pattern on Pandora product names (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "charm"
+name_words = ["Charm", "Dangle", "Pendant Charm", "Mini Dangle", "Medallion"]
+category = ["charms"]
+source = "guide §1 (Moments charms, dangles/pendants; ME mini dangles, medallions) [official]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "ring"
+name_words = ["Ring"]
+note = "After charm: a \"Ring Dangle Charm\" is a charm."
+source = "pattern on Pandora product names (no external fact)"
+as_of = "2026-11-15"
+
+# Style numbers, used only when the name said nothing: first digit = category.
+[[kind]]
+store = "pandora-us"
+kind = "ring"
+id_prefix = ["1"]
+source = "guide §3: Pandora product-code page, https://us.pandora.net/en/jewelry-guide/universe/product-codes/ (1 = rings) [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "earring"
+id_prefix = ["2"]
+source = "guide §3: Pandora product-code page (2 = earrings) [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "bracelet"
+id_prefix = ["5"]
+note = "UNVERIFIED inference: consistent across many listings, but Pandora's own text for 5 was not seen."
+source = "guide §3: inferred from listings (590702 snake chain bracelet, 563050C00, 583050C00) [inference]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "charm"
+id_prefix = ["7"]
+note = "UNVERIFIED inference: consistent across many listings, but Pandora's own text for 7 was not seen."
+source = "guide §3: inferred from listings (7931xx charms, 794948C01, 764020C01) [inference]"
+as_of = "2026-11-15"
+
+[[kind]]
+store = "pandora-us"
+kind = "necklace"
+id_prefix = ["3"]
+note = "UNVERIFIED inference."
+source = "guide §3: inferred from listings (399590C00 ME necklace, 314563C00 snake chain necklace) [inference]"
+as_of = "2026-11-15"
+
+# ---------------------------------------------------------------- kinds: any store
+
+[[kind]]
+kind = "safety-chain"
+name_words = ["Safety Chain"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+kind = "clip"
+name_words = ["Clip"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+kind = "spacer"
+name_words = ["Spacer"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+kind = "bracelet"
+name_words = ["Bracelet", "Bangle", "Anklet"]
+type_words = ["Bracelet", "Bangle"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+kind = "gift-set"
+name_words = ["Gift Set"]
+type_words = ["Gift Set"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+kind = "necklace"
+name_words = ["Necklace", "Choker", "Pendant"]
+type_words = ["Necklace", "Pendant"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+kind = "earring"
+name_words = ["Earring", "Hoop", "Stud", "Huggie", "Ear Cuff"]
+type_words = ["Earring"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+kind = "ring"
+name_words = ["Ring"]
+type_words = ["Ring"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[kind]]
+kind = "charm"
+name_words = ["Charm", "Dangle"]
+type_words = ["Charm"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+# ---------------------------------------------------------------- metal groups
+# A capture's own metal_group wins. Otherwise the metal text (or the name) is matched, in order.
+
+[[metal_group]]
+store = "pandora-us"
+group = "Silver"
+id_prefix = ["?9"]
+note = "Second digit of the style number: 9 = sterling silver (925)."
+source = "guide §3: Pandora product-code page https://us.pandora.net/en/jewelry-guide/universe/product-codes/ [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[metal_group]]
+store = "pandora-us"
+group = "Rose gold"
+id_prefix = ["?8"]
+note = "8 = Pandora Rose (now 14k rose gold-plated)."
+source = "guide §3: Pandora product-code page [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[metal_group]]
+store = "pandora-us"
+group = "Gold"
+id_prefix = ["?6", "?5", "?7"]
+note = "6 = Pandora Shine (now 14k gold-plated), 5 = 14k gold (585), 7 = 18k gold (750)."
+source = "guide §3: Pandora product-code page [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[metal_group]]
+group = "Two Tone"
+words = ["two-tone", "two tone", "mixed metals"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[metal_group]]
+group = "Rose gold"
+words = ["rose gold", "rose gold-plated", "pandora rose"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[metal_group]]
+group = "Platinum"
+words = ["platinum", "platinum-plated", "lasting shine"]
+note = "Pandora's 2026 \"Lasting Shine\" items are platinum-plated alloy, not sterling silver."
+source = "guide §3: https://us.pandora.net/en/jewelry/platinum-plated-jewelry/ [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[metal_group]]
+group = "Gold"
+words = ["gold", "14k", "18k", "gold-plated", "gold vermeil", "vermeil", "pandora shine"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+[[metal_group]]
+group = "Silver"
+words = ["sterling silver", "silver", "925"]
+source = "word pattern (no external fact)"
+as_of = "2026-11-15"
+
+# ---------------------------------------------------------------- compatibility systems (Pandora)
+
+[[system]]
+id = "pandora-reflexions"
+label = "Pandora Reflexions"
+store = "pandora-us"
+kinds = ["bracelet", "charm", "clip", "safety-chain", "spacer"]
+name_words = ["Reflexions"]
+collection_words = ["Reflexions"]
+note = "Flat mesh bracelets; Reflexions clip charms and Reflexions safety chains only."
+source = "guide §1: https://sg.pandora.net/en/inspiration/bracelet-guide/PANDORA-Reflexions/ , https://ca.pandora.net/en/pandora-reflexions-collection/pandora-reflexions.html [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[system]]
+id = "pandora-me-moments"
+label = "Pandora ME (also fits Moments)"
+store = "pandora-us"
+kinds = ["charm"]
+badge_words = ["compatible with me & moments", "compatible with pandora me/moments", "me & moments", "me/moments"]
+note = "Some newer ME medallions and mini dangles are labelled compatible with ME and Moments. Only detected when the capture carries that label as a badge; read each ME charm's compatibility line."
+source = "guide §1: https://ca.pandora.net/en/charms-bracelets/charms/charms/pandora-me-lucky-medallion-charm/793104C01.html , https://uk.pandora.net/en/jewellery/personalised-for-you/gradient-planet-mini-dangle-charm/793448C01.html [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[system]]
+id = "pandora-me"
+label = "Pandora ME"
+store = "pandora-us"
+kinds = ["bracelet", "charm", "clip", "spacer", "safety-chain"]
+name_words = ["Pandora ME", "ME Link", "Openable Link", "Styling Link", "Mini Dangle", "Medallion"]
+collection_words = ["Pandora ME"]
+note = "ME link chain bracelets with openable links; ME mini dangles, medallions and styling links."
+source = "guide §1: https://us.pandora.net/en/charms-bracelets/pandora-me-styling-accents/styling-connectors/pandora-me-round-openable-link/799671C00.html [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[system]]
+id = "pandora-essence"
+label = "Pandora Essence (original charm system)"
+store = "pandora-us"
+kinds = ["bracelet", "charm"]
+name_words = ["Essence"]
+note = "The original 2013 Essence charms: smaller, fit only Essence bracelets. Status unknown; the current PANDORA ESSENCE collection (rings, necklaces, earrings) is not a charm system."
+source = "guide §1: https://sg.pandora.net/en/charms/charms/Friendship-ESSENCE-Charm/796086CZ.html [official, via search snippet]; https://elisailana.com/pages/pandora-information [retailer]"
+as_of = "2026-11-15"
+
+[[system]]
+id = "pandora-moments"
+label = "Pandora Moments"
+store = "pandora-us"
+kinds = ["bracelet", "charm", "clip", "spacer", "safety-chain"]
+fallback = true
+note = "Inference: a Pandora bracelet, charm, clip, spacer or safety chain not named ME, Reflexions or Essence is taken as Moments (Moments is the main system: snake chain, T-bar, studded chain, bangles, slider, leather)."
+source = "guide §1 table and https://sg.pandora.net/en/inspiration/bracelet-guide/Moments-Bracelets/ [official, via search snippet]; the fallback itself is an inference"
+as_of = "2026-11-15"
+
+# ---------------------------------------------------------------- which add-ons fit which bracelets
+
+[[fit]]
+addon_system = "pandora-moments"
+base_systems = ["pandora-moments"]
+note = "Moments bracelets take only Moments charms, clips and safety chains."
+source = "guide §1: \"Pandora Moments bracelets are only compatible with Pandora Moments charms, clips and safety chains.\" https://sg.pandora.net/en/inspiration/bracelet-guide/Moments-Bracelets/ , https://au.pandora.net/en/inspiration/bracelet-guide/moments-bracelets/ [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[fit]]
+addon_system = "pandora-me"
+base_systems = ["pandora-me"]
+note = "ME pieces fit ME link bracelets; regular Moments bead charms don't fit ME links."
+source = "guide §1: ME Round Openable Link 799671C00 \"only compatible with Pandora ME jewelry\" [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[fit]]
+addon_system = "pandora-me-moments"
+base_systems = ["pandora-me", "pandora-moments"]
+note = "Dual-labelled ME charms (\"Compatible with ME & Moments\")."
+source = "guide §1: 793104C01, 793448C01 product pages [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[fit]]
+addon_system = "pandora-reflexions"
+base_systems = ["pandora-reflexions"]
+note = "Reflexions bracelets are flat mesh: only Reflexions clip charms and safety chains fit them, and those don't fit other bracelets."
+source = "guide §1: https://sg.pandora.net/en/inspiration/bracelet-guide/PANDORA-Reflexions/ [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[fit]]
+addon_system = "pandora-essence"
+base_systems = ["pandora-essence"]
+note = "Essence charms are smaller and fit only Essence bracelets."
+source = "guide §1: https://sg.pandora.net/en/charms/charms/Friendship-ESSENCE-Charm/796086CZ.html [official, via search snippet]"
+as_of = "2026-11-15"
+
+# ---------------------------------------------------------------- sizing
+
+[[sizing]]
+store = "pandora-us"
+system = "pandora-moments"
+chart = [[13, 15], [14, 16], [15, 17], [16, 18], [17, 19], [18, 20], [19, 21], [20, 23]]
+text = "Moments snake chain: wrist + 2 cm (a 20 cm wrist takes 23); between sizes, size up. Unsure of the wrist? The adjustable Moments Snake Chain Slider Bracelet (599652C01) fits 15-23 cm wrists."
+source = "guide §2: Pandora size guide https://www.pandora.net/size-guide [official, via search snippet], chart reproduced by https://size-charts.com/brands/pandora-size-charts/pandora-bracelet-size-chart-and-fitting-guide [3rd]"
+as_of = "2026-11-15"
+
+[[sizing]]
+store = "pandora-us"
+system = "pandora-reflexions"
+add_cm = 1
+text = "Reflexions mesh runs about wrist + 1 cm; Pandora Canada suggests going down a size. Check the chart on the product page."
+source = "guide §1-2: https://pandorashop.mt/guide-size-bracelets [retailer, Pandora franchise], https://ca.pandora.net/en/pandora-reflexions-collection/pandora-reflexions.html [official, via search snippet]"
+as_of = "2026-11-15"
+
+# ME link bracelets and bangles use their own charts (guide §2): no rule here, so no size is guessed.
+
+# ---------------------------------------------------------------- store policies
+
+[[policy]]
+store = "pandora-us"
+when = "engravable"
+text = "Engraving costs $20 per item, adds 1 business day, and engraved items are final sale (unless damaged or defective)."
+source = "guide §5: https://help.pandora.net/s/article/Do-you-offer-engraving-services-and-how-much-does-it-cost?language=en_US , https://help.pandora.net/s/article/SHIPPING-TIMELINE-FOR-ENGRAVED-ITEMS?language=en_US [official, via search snippet]; final sale per Pandora CA policy and https://storepolicies.com/pandora-return-policy/ [3rd]"
+as_of = "2026-11-15"
+
+[[policy]]
+store = "pandora-us"
+when = "badge"
+badge = "Last Chance"
+text = "Last Chance items are final sale."
+source = "guide §5: https://help.pandora.net/ca/s/article/ca-return-policy?language=en_CA [official CA, via search snippet]; thereturnguide.com, storepolicies.com [3rd]"
+as_of = "2026-11-15"
+
+# ---------------------------------------------------------------- notes shown when building a gift
+
+[[note]]
+store = "pandora-us"
+topic = "clips"
+text = "A Moments snake chain has two threads: two clips divide it into three sections. Bangles and studded chains have no threads, so use clips with silicone grips there; silicone-grip clips don't fit over threads. A safety chain attaches to both ends of the bracelet."
+source = "guide §1: Pandora Moments snake chain product copy and bracelet guide [official, via search snippet]; https://elisailana.com/pages/pandora-information [retailer]"
+as_of = "2026-11-15"
+
+[[note]]
+store = "pandora-us"
+topic = "sizing"
+text = "If the wrist size is unknown: the adjustable Moments Snake Chain Slider Bracelet (599652C01) fits 15-23 cm, or buy 19 cm and plan an exchange in a Pandora store. Avoid engraved and Last Chance bracelets (final sale)."
+source = "guide §2: https://sg.pandora.net/en/charms-bracelets/bracelets/chain-bracelets/pandora-moments-snake-chain-slider-bracelet/599652C01.html , https://us.pandora.net/en/returns-exchanges/returns-csc.html [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[note]]
+store = "pandora-us"
+topic = "fit"
+text = "ME charms vary: some are labelled compatible with ME and Moments, others only fit ME openable links. Read each ME charm's compatibility line before buying it for a Moments bracelet."
+source = "guide §1: 793104C01, 793448C01, 763369C01 product pages [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[note]]
+store = "pandora-us"
+topic = "where-to-buy"
+text = "Pandora does not sell through Amazon, and items from eBay or auction sites carry no Pandora warranty. Prices clearly below Pandora's own sale are a counterfeit red flag."
+source = "guide §6: https://investor.pandoragroup.com/node/27376 , https://pandoragroup.com/about-us/brand-protection/authorised-pandora-retailers [official]"
+as_of = "2026-11-15"
+
+[[note]]
+store = "pandora-us"
+topic = "sales"
+text = "Black Friday 2026 likely runs 11/12 to 12/1 (confirm on the site banner); Cyber Monday has not gone deeper in past years. December free-bracelet events (2025: $145+) excluded sale items."
+source = "guide §4: https://us.pandora.net/en/jewelry/black-friday/ [official, via search snippet]; https://www.blackerfriday.com/?p=1398 [3rd]"
+as_of = "2026-11-15"
+
+# ---------------------------------------------------------------- building a gift
+
+[build]
+base_kinds = ["bracelet"]
+addon_kinds = ["charm", "clip", "spacer", "safety-chain"]
+limits = { clip = 2, safety-chain = 1 }
+limits_source = "guide §1: two clips on a Moments snake chain's two threads; a safety chain attaches to both ends (one per bracelet is an inference) [official, via search snippet]"
+max_addons = 8

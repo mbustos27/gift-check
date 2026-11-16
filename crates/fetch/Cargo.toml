@@ -1,0 +1,13 @@
+[package]
+name = "gift_check_fetch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Polite Shopify catalog fetcher for gift-check: robots.txt, 3 s per host, one Retry-After, stops at bot checks. The only crate with network code."
+
+[dependencies]
+gift_check_core = { path = "../core" }
+ureq.workspace = true
+
+[dev-dependencies]
+tiny_http.workspace = true

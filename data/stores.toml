@@ -1,0 +1,28 @@
+# The stores gift-check knows. Only these stores' pages and images are trusted:
+# capture URLs must be https on `origin`, images on `origin` or an `image_hosts` entry, and the
+# window's Content-Security-Policy only loads images from these hosts.
+#
+# source = "shopify"          the public /products.json catalog, fetched politely over HTTPS
+# source = "browser-capture"  behind a bot check; read in a real browser and sent through the
+#                             bridge (gift-check ui -> Captures -> Open the bridge) or a capture file
+#
+# A copy of this file in the data folder (%APPDATA%\gift-check\stores.toml) takes precedence.
+
+[[store]]
+id = "pandora-us"
+name = "Pandora (US)"
+origin = "https://us.pandora.net"
+source = "browser-capture"
+currency = "USD"
+image_hosts = ["us.pandora.net"]
+start_urls = ["https://us.pandora.net/en/charms/", "https://us.pandora.net/en/bracelets/"]
+note = "Answers plain HTTP with a Cloudflare challenge, so it is captured in the browser."
+
+[[store]]
+id = "hardjewelry"
+name = "Hard Jewelry"
+origin = "https://www.hardjewelry.com"
+source = "shopify"
+currency = "USD"
+image_hosts = ["cdn.shopify.com", "www.hardjewelry.com"]
+note = "Shopify store; robots.txt allows /products and /collections."

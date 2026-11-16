@@ -1,0 +1,16 @@
+[package]
+name = "gift-check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shop for gifts across store catalogs: fetch or capture listings, search, compare and plan a gift within a budget."
+
+[[bin]]
+name = "gift-check"
+path = "src/main.rs"
+
+[dependencies]
+gift_check_core = { path = "../core" }
+gift_check_fetch = { path = "../fetch" }
+gift_check_ui = { path = "../ui" }
+serde_json.workspace = true

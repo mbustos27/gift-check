@@ -1,0 +1,13 @@
+[package]
+name = "gift_check_ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local window for gift-check: served on 127.0.0.1 only, opened in your browser, plus the capture bridge."
+
+[dependencies]
+gift_check_core = { path = "../core" }
+gift_check_fetch = { path = "../fetch" }
+serde.workspace = true
+serde_json.workspace = true
+tiny_http.workspace = true
