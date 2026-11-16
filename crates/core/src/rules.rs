@@ -133,10 +133,19 @@ pub struct SizingRule {
 pub struct PolicyRule {
     #[serde(default = "any_store")]
     pub store: String,
-    /// "engravable" or "badge".
+    /// "engravable", "badge" (with `badge`), "name" (with `words`) or "id_prefix" (with `prefix`).
     pub when: String,
     #[serde(default)]
     pub badge: Option<String>,
+    /// Whole words in the product name, any of them ("FINAL SALE"); case doesn't matter.
+    #[serde(default)]
+    pub words: Vec<String>,
+    /// Start of the product id ("ENG"); `?` matches any one character.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// The item can't be returned: the planner suggests it only when nothing returnable fits.
+    #[serde(default)]
+    pub final_sale: bool,
     pub text: String,
     pub source: String,
     pub as_of: String,
@@ -286,9 +295,17 @@ impl Rules {
         }
         for r in &self.policies {
             sourced(&format!("policy {:?}", r.when), &r.source, &r.as_of)?;
-            match (r.when.as_str(), &r.badge) {
-                ("engravable", _) | ("badge", Some(_)) => {}
-                _ => return Err("rules.toml: policy `when` must be \"engravable\" or \"badge\" (with badge = \"...\")".into()),
+            let ok = match r.when.as_str() {
+                "engravable" => true,
+                "badge" => r.badge.as_deref().is_some_and(|b| !b.trim().is_empty()),
+                "name" => !r.words.is_empty() && r.words.iter().all(|w| !w.trim().is_empty()),
+                "id_prefix" => r.prefix.as_deref().is_some_and(|x| !x.is_empty()),
+                _ => false,
+            };
+            if !ok {
+                return Err(
+                    "rules.toml: policy `when` must be \"engravable\", \"badge\" (with badge = \"...\"), \"name\" (with words = [...]) or \"id_prefix\" (with prefix = \"...\")".into(),
+                );
             }
         }
         for r in &self.notes {
@@ -419,8 +436,8 @@ impl Rules {
         Some(SizeAdvice { bracelet_cm: size, text: r.text.clone(), source: r.source.clone() })
     }
 
-    /// Policy warnings for a product (engraving, final-sale badges).
-    pub fn policy_warnings(&self, p: &Product) -> Vec<(String, String)> {
+    /// The policy rules that apply to a product.
+    pub fn policies_for(&self, p: &Product) -> Vec<&PolicyRule> {
         let badges = p.badges.as_deref().unwrap_or_default();
         self.policies
             .iter()
@@ -428,10 +445,21 @@ impl Rules {
             .filter(|r| match r.when.as_str() {
                 "engravable" => p.engravable == Some(true),
                 "badge" => r.badge.as_deref().is_some_and(|want| badges.iter().any(|b| has_words(b, want))),
+                "name" => any_words(&p.name, &r.words),
+                "id_prefix" => r.prefix.as_deref().is_some_and(|x| id_has_prefix(&p.id, x)),
                 _ => false,
             })
-            .map(|r| (r.text.clone(), r.source.clone()))
             .collect()
+    }
+
+    /// Policy warnings for a product (engraving, final-sale badges and names), as (text, source).
+    pub fn policy_warnings(&self, p: &Product) -> Vec<(String, String)> {
+        self.policies_for(p).into_iter().map(|r| (r.text.clone(), r.source.clone())).collect()
+    }
+
+    /// Can't be returned: a policy marked `final_sale` applies.
+    pub fn is_final_sale(&self, p: &Product) -> bool {
+        self.policies_for(p).iter().any(|r| r.final_sale)
     }
 
     pub fn notes_for(&self, store: Option<&str>) -> Vec<&NoteRule> {

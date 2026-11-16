@@ -147,7 +147,10 @@
       in_stock: typeof x.productInStock === 'boolean' ? x.productInStock : null,
       currency: hit.currency || 'USD',
       list_price: typeof hit.price === 'number' ? hit.price : null,
-      image: (hit.primaryImage && hit.primaryImage.disBaseLink) || (hit.image && hit.image.disBaseLink) || null,
+      // The tight packshot first (its query string dropped); primaryImage is a 1500 px PNG with
+      // wide transparent margins that shows as a dot in a thumbnail.
+      image: (hit.image && typeof hit.image.disBaseLink === 'string' && hit.image.disBaseLink.split(/[?#]/)[0]) ||
+        (hit.primaryImage && hit.primaryImage.disBaseLink) || null,
     };
   }
 

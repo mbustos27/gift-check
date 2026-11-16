@@ -114,6 +114,7 @@ button:disabled { opacity: 0.55; cursor: progress; }
 .rows.compact .prod { grid-template-columns: 48px minmax(0, 1fr) auto; padding: 0.45rem 0.7rem; }
 .thumb { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; background: var(--accent-soft); display: block; }
 .rows.compact .thumb { width: 48px; height: 48px; }
+img.thumb { background: #f5f5f5; object-fit: contain; }
 .prod .name { font-weight: 650; }
 .meta { color: var(--muted); font-size: 0.85rem; }
 .price { text-align: right; white-space: nowrap; }
@@ -144,6 +145,7 @@ button:disabled { opacity: 0.55; cursor: progress; }
 .sugg ul { margin: 0.4rem 0 0; padding-left: 1.1rem; }
 .sugg li { margin: 0.2rem 0; }
 .sugg .why { color: var(--muted); font-size: 0.85rem; }
+.sugg .policy { color: var(--stop); font-size: 0.85rem; font-weight: 600; }
 
 ul.plain { list-style: none; padding: 0; margin: 0; }
 ul.plain li { padding: 0.45rem 0; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 0.3rem 0.8rem; align-items: center; justify-content: space-between; }
@@ -165,7 +167,7 @@ dialog { border: 1px solid var(--line); border-radius: var(--radius); background
 dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .dialog-head { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
 .detail-top { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 1rem; margin-bottom: 1rem; }
-.detail-top img { width: 140px; height: 140px; object-fit: cover; border-radius: 10px; background: var(--accent-soft); }
+.detail-top img { width: 140px; height: 140px; object-fit: contain; border-radius: 10px; background: #f5f5f5; }
 @media (max-width: 560px) { .detail-top { grid-template-columns: 1fr; } }
 dl.facts { display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.9rem; margin: 0; font-size: 0.9rem; }
 dl.facts dt { color: var(--muted); }

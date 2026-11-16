@@ -112,8 +112,9 @@ CSP with `img-src` limited to the stores' image hosts; store text is only ever s
 
 `data/rules.toml` holds every store fact: how to tell a product's kind (names, Pandora style
 numbers), metal group, compatibility system (Pandora Moments, ME, Reflexions, Essence), which
-add-on systems fit which bracelets, sizing charts, clip limits, policies (engraving and Last
-Chance are final sale) and notes. Each rule has a `source` and an `as_of` date; the shipped
+add-on systems fit which bracelets, sizing charts, clip limits, policies (engraving, Last
+Chance, "FINAL SALE - " names and pre-engraved ENG ids are final sale: the planner suggests a
+final-sale item only when nothing returnable fits, and says so) and notes. Each rule has a `source` and an `as_of` date; the shipped
 Pandora facts cite the research report `2026-11-15-pandora-buying-guide.md`. A bracelet is a
 charm-bracelet base only when something names its system (Moments, a snake chain, a charm
 bangle, ME, Reflexions, or its collection): tennis, chain and cord bracelets are not. Add-ons no

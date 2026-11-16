@@ -422,6 +422,9 @@ fn plan_cmd(db: &Db, cfg: &Config, rest: &[String]) -> Result<i32, String> {
         for p in sug.base.iter().chain(&sug.addons) {
             println!("  {:>9}  {}  [{}:{}]", money(Some(p.price)), p.name, p.store, p.id);
             println!("             {}", p.why);
+            for w in &p.policies {
+                println!("             ! {w}");
+            }
         }
         for n in &sug.notes {
             println!("  {n}");

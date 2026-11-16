@@ -389,6 +389,7 @@ as_of = "2026-11-15"
 [[policy]]
 store = "pandora-us"
 when = "engravable"
+final_sale = true
 text = "Engraving costs $20 per item, adds 1 business day, and engraved items are final sale (unless damaged or defective)."
 source = "guide §5: https://help.pandora.net/s/article/Do-you-offer-engraving-services-and-how-much-does-it-cost?language=en_US , https://help.pandora.net/s/article/SHIPPING-TIMELINE-FOR-ENGRAVED-ITEMS?language=en_US [official, via search snippet]; final sale per Pandora CA policy and https://storepolicies.com/pandora-return-policy/ [3rd]"
 as_of = "2026-11-15"
@@ -397,8 +398,26 @@ as_of = "2026-11-15"
 store = "pandora-us"
 when = "badge"
 badge = "Last Chance"
+final_sale = true
 text = "Last Chance items are final sale."
 source = "guide §5: https://help.pandora.net/ca/s/article/ca-return-policy?language=en_CA [official CA, via search snippet]; thereturnguide.com, storepolicies.com [3rd]"
+as_of = "2026-11-15"
+
+[[policy]]
+when = "name"
+words = ["FINAL SALE"]
+final_sale = true
+text = "Final sale: can't be returned or exchanged."
+source = "Pandora US listing names starting \"FINAL SALE - \" (e.g. 793388C01, 588782C00) in the 2026-11-15 capture; Last Chance / final sale policy per guide §5 [official CA, via search snippet]"
+as_of = "2026-11-15"
+
+[[policy]]
+store = "pandora-us"
+when = "id_prefix"
+prefix = "ENG"
+final_sale = true
+text = "Engraved to order: final sale, adds about 1 business day."
+source = "Pandora US pre-engraved listings have ids starting ENG (e.g. ENG791169_424, ENG792017CZ_81) in the 2026-11-15 capture, engraved to order although the data says engravable=false; engraving is final sale and adds 1 business day per guide §5 (help.pandora.net engraving articles) [official, via search snippet]"
 as_of = "2026-11-15"
 
 # ---------------------------------------------------------------- notes shown when building a gift

@@ -203,3 +203,12 @@ test('ssrRecord reads a collection from the structured data when there is one', 
   assert.equal(r.path, '/en/c.html');
   assert.equal(gc.ssrRecord({ productId: '1', c_extend: {} }, 'charms', 'r').collection, null);
 });
+
+test('ssrRecord prefers the tight packshot (without its query) over the padded primary image', () => {
+  const hit = { productId: '793388C01', productName: 'Cat Charm', c_extend: {},
+    image: { disBaseLink: 'https://us.pandora.net/dw/image/v2/X/793388C01_RGB.jpg?sw=600&q=80' },
+    primaryImage: { disBaseLink: 'https://us.pandora.net/dw/image/v2/X/793388C01_main_rect_base.png' } };
+  assert.equal(gc.ssrRecord(hit, 'charms', 'r').image, 'https://us.pandora.net/dw/image/v2/X/793388C01_RGB.jpg');
+  const onlyPrimary = { productId: '1', c_extend: {}, primaryImage: { disBaseLink: 'https://us.pandora.net/p.png' } };
+  assert.equal(gc.ssrRecord(onlyPrimary, 'charms', 'r').image, 'https://us.pandora.net/p.png');
+});

@@ -284,6 +284,10 @@ pub struct Pick {
     pub priced: String,
     /// The fit rests on a system guessed by a fallback rule.
     pub fit_inferred: bool,
+    /// Store policies that apply (final sale, engraving), as text.
+    pub policies: Vec<String>,
+    /// Can't be returned: suggested only when nothing returnable fits.
+    pub final_sale: bool,
     pub why: String,
 }
 
@@ -312,7 +316,7 @@ fn metal_ok(p: &Product, r: &Recipient) -> bool {
     }
 }
 
-fn pick(p: &Product, why: Vec<String>) -> Pick {
+fn pick(p: &Product, why: Vec<String>, rules: &Rules) -> Pick {
     Pick {
         store: p.store.clone(),
         id: p.id.clone(),
@@ -327,13 +331,17 @@ fn pick(p: &Product, why: Vec<String>) -> Pick {
         image: p.image.clone(),
         priced: priced_variant(p),
         fit_inferred: p.system_inferred,
+        policies: rules.policy_warnings(p).into_iter().map(|(text, _)| text).collect(),
+        final_sale: rules.is_final_sale(p),
         why: why.join("; "),
     }
 }
 
 /// Suggests up to `max` gifts within `budget`: a bracelet (or, when the recipient already has a
 /// bracelet system, none) plus add-ons the rules say fit it. Only confirmed fits are suggested;
-/// owned, out-of-stock and discontinued items are left out.
+/// owned, out-of-stock and discontinued items are left out. Final-sale items (a policy marked
+/// `final_sale`) come last: one is used only when nothing returnable fits, and the notes say so.
+/// A bracelet with no add-ons is only offered when no option has add-ons.
 pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&str>, rules: &Rules, max: usize) -> Vec<Suggestion> {
     let eligible = |p: &&Product| {
         !p.discontinued && p.in_stock != Some(false) && p.current().is_some() && store.is_none_or(|s| p.store == s) && !r.owns(p)
@@ -346,7 +354,7 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
     if bases.iter().any(|p| metal_ok(p, r)) {
         bases.retain(|p| metal_ok(p, r));
     }
-    bases.sort_by(|a, b| liked(b, r).len().cmp(&liked(a, r).len()).then_with(|| cheaper(a, b)));
+    bases.sort_by(|a, b| rules.is_final_sale(a).cmp(&rules.is_final_sale(b)).then_with(|| liked(b, r).len().cmp(&liked(a, r).len())).then_with(|| cheaper(a, b)));
     let mut per_system: Vec<&Product> = Vec::new();
     for b in bases {
         if !per_system.iter().any(|x| x.system == b.system) {
@@ -384,41 +392,54 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
         candidates.retain(|c| c.0.currency == currency);
         let mut per_kind: std::collections::BTreeMap<String, u32> = Default::default();
         let mut fit_sources: Vec<String> = Vec::new();
-        for (p, _, likes, source) in candidates {
-            if addons.len() as u32 >= rules.build.max_addons {
+        // Returnable add-ons first; final-sale ones only when none of those fits.
+        let (returnable, final_sale): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| !rules.is_final_sale(c.0));
+        for (round, group) in [returnable, final_sale].into_iter().enumerate() {
+            if round == 1 && !addons.is_empty() {
                 break;
             }
-            let price = p.current().unwrap_or(f64::MAX);
-            if price > left + 0.004 {
-                continue;
+            for (p, _, likes, source) in group {
+                if addons.len() as u32 >= rules.build.max_addons {
+                    break;
+                }
+                let price = p.current().unwrap_or(f64::MAX);
+                if price > left + 0.004 {
+                    continue;
+                }
+                let kind = p.kind.clone().unwrap_or_default();
+                if rules.build.limits.get(&kind).is_some_and(|m| per_kind.get(&kind).copied().unwrap_or(0) >= *m) {
+                    continue;
+                }
+                *per_kind.entry(kind).or_default() += 1;
+                left -= price;
+                let mut why = Vec::new();
+                if !likes.is_empty() {
+                    why.push(format!("matches {}", likes.join(", ")));
+                }
+                if let Some(off) = p.pct_off() {
+                    why.push(format!("{off:.0}% off"));
+                }
+                if let Some(m) = &p.metal_group {
+                    why.push(m.clone());
+                }
+                why.push(format!("fits {label}"));
+                if p.system_inferred {
+                    why.push("fit inferred, check the product page".into());
+                }
+                if !fit_sources.contains(&source) {
+                    fit_sources.push(source);
+                }
+                addons.push((p, why));
             }
-            let kind = p.kind.clone().unwrap_or_default();
-            if rules.build.limits.get(&kind).is_some_and(|m| per_kind.get(&kind).copied().unwrap_or(0) >= *m) {
-                continue;
-            }
-            *per_kind.entry(kind).or_default() += 1;
-            left -= price;
-            let mut why = Vec::new();
-            if !likes.is_empty() {
-                why.push(format!("matches {}", likes.join(", ")));
-            }
-            if let Some(off) = p.pct_off() {
-                why.push(format!("{off:.0}% off"));
-            }
-            if let Some(m) = &p.metal_group {
-                why.push(m.clone());
-            }
-            why.push(format!("fits {label}"));
-            if p.system_inferred {
-                why.push("fit inferred, check the product page".into());
-            }
-            if !fit_sources.contains(&source) {
-                fit_sources.push(source);
-            }
-            addons.push((p, why));
         }
 
         let mut notes = Vec::new();
+        if base.is_some_and(|b| rules.is_final_sale(b)) {
+            notes.push(format!("No returnable {label} bracelet fits the budget; this one is final sale (can't be returned)."));
+        }
+        if addons.iter().any(|(p, _)| rules.is_final_sale(p)) {
+            notes.push(format!("No returnable add-on for the {label} bracelet fits the budget, so these add-ons are final sale (can't be returned)."));
+        }
         for s in &fit_sources {
             notes.push(format!("Fit rule for the {label} bracelet: {s}"));
         }
@@ -439,7 +460,7 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
                     None => notes.push(format!("Size: the wrist is beyond the size chart. {} (source: {})", adv.text, adv.source)),
                 }
             }
-            pick(b, why)
+            pick(b, why, rules)
         });
         let title = match base {
             Some(b) => format!("{} + {} add-on{}", b.name, addons.len(), if addons.len() == 1 { "" } else { "s" }),
@@ -448,7 +469,7 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
         if base.is_none() && addons.is_empty() {
             continue;
         }
-        let picks: Vec<Pick> = addons.iter().map(|(p, why)| pick(p, why.clone())).collect();
+        let picks: Vec<Pick> = addons.iter().map(|(p, why)| pick(p, why.clone(), rules)).collect();
         let total: f64 = base_pick.iter().map(|b| b.price).sum::<f64>() + picks.iter().map(|p| p.price).sum::<f64>();
         let list_total: f64 = base_pick.iter().map(|b| b.list_price).sum::<f64>() + picks.iter().map(|p| p.list_price).sum::<f64>();
         let liked_count = addons.iter().filter(|(p, _)| !liked(p, r).is_empty()).count() + base.map_or(0, |b| usize::from(!liked(b, r).is_empty()));
@@ -457,8 +478,13 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
             Suggestion { title, currency, base: base_pick, addons: picks, total: round2(total), list_total: round2(list_total), savings: round2(list_total - total), left: round2(budget - total), notes },
         ));
     }
-    // More liked picks first, then the one that uses the budget best.
-    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.left.total_cmp(&b.1.left)));
+    // A bracelet alone is no gift plan when other options come with add-ons.
+    if out.iter().any(|(_, s)| !s.addons.is_empty()) {
+        out.retain(|(_, s)| !s.addons.is_empty());
+    }
+    // Returnable gifts first, then more liked picks, then the one that uses the budget best.
+    let has_final = |s: &Suggestion| s.base.iter().chain(&s.addons).any(|p| p.final_sale);
+    out.sort_by(|a, b| has_final(&a.1).cmp(&has_final(&b.1)).then_with(|| b.0.cmp(&a.0)).then_with(|| a.1.left.total_cmp(&b.1.left)));
     out.into_iter().map(|(_, s)| s).take(max).collect()
 }
 
@@ -676,5 +702,47 @@ mod tests {
         p.variants = vec![v("a", "17 cm", 80.0, true), v("b", "19 cm", 70.0, true)];
         let priced = evaluate(&[(p, 1)], None, None, &r).lines[0].priced.clone();
         assert!(priced.starts_with("19 cm") && priced.contains("differ"), "{priced}");
+    }
+
+    #[test]
+    fn final_sale_and_engraved_to_order_items_are_flagged_and_come_last() {
+        let rules = crate::Config::built_in().unwrap().rules;
+        // The shipped policies see "FINAL SALE - " names and ENG ids (engravable is false there).
+        let fs = shipped("793388C01", "FINAL SALE - Cat Dangle Charm", 20.0, &[]);
+        let eng = shipped("ENG791169_424", "Engraved Cat Heart Dangle Charm", 25.0, &[]);
+        assert!(rules.policy_warnings(&fs).iter().any(|(t, _)| t.starts_with("Final sale")), "{:?}", rules.policy_warnings(&fs));
+        assert!(rules.policy_warnings(&eng).iter().any(|(t, _)| t.starts_with("Engraved to order")), "{:?}", rules.policy_warnings(&eng));
+        assert!(rules.is_final_sale(&fs) && rules.is_final_sale(&eng));
+        let ok = shipped("791001", "Lucky Cat Dangle Charm", 50.0, &[]);
+        assert!(!rules.is_final_sale(&ok) && rules.policy_warnings(&ok).is_empty());
+
+        let bracelet = shipped("590702", "Pandora Moments Snake Chain Bracelet", 75.0, &[]);
+        let catalog = vec![bracelet.clone(), fs.clone(), eng.clone(), ok.clone()];
+        let mom = Recipient { nick: "Mom".into(), likes: vec!["cats".into()], ..Default::default() };
+        // A returnable charm fits: no final-sale item is used, however liked or cheap.
+        let s = suggest(&catalog, &mom, 200.0, None, &rules, 4);
+        let ids: Vec<&str> = s[0].addons.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["791001"], "{s:?}");
+        assert!(s[0].addons.iter().all(|a| !a.final_sale && a.policies.is_empty()));
+        // Only final-sale charms fit what is left: they are used, flagged and explained.
+        let s = suggest(&catalog, &mom, 120.0, None, &rules, 4);
+        let picked = &s[0].addons;
+        assert!(!picked.is_empty() && picked.iter().all(|a| a.final_sale), "{s:?}");
+        let eng_pick = picked.iter().find(|a| a.id == "ENG791169_424").unwrap();
+        assert!(eng_pick.policies.iter().any(|t| t.contains("Engraved to order")), "{eng_pick:?}");
+        assert!(s[0].notes.iter().any(|n| n.contains("No returnable add-on")), "{:?}", s[0].notes);
+    }
+
+    #[test]
+    fn a_bracelet_without_add_ons_is_offered_only_when_nothing_has_add_ons() {
+        let r = rules();
+        // The Reflexions bracelet has nothing that fits it here; the Moments one does.
+        let catalog = vec![item("590702", "Pandora Moments Snake Chain Bracelet", 70.0), item("597602", "Pandora Reflexions Mesh Bracelet", 65.0), item("790001", "Cat Charm", 50.0)];
+        let s = suggest(&catalog, &mom(), 150.0, None, &r, 5);
+        assert_eq!(s.len(), 1, "{s:?}");
+        assert_eq!(s[0].base.as_ref().unwrap().id, "590702");
+        // With nothing that fits either bracelet, the bracelets alone are still offered.
+        let s = suggest(&catalog[..2], &mom(), 150.0, None, &r, 5);
+        assert_eq!(s.len(), 2);
     }
 }

@@ -28,15 +28,22 @@ function webLink(url, text) {
   return ok ? el("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, text) : document.createTextNode(text);
 }
 
+/** Pandora's images are 1500 px packshots with wide transparent margins: ask its own image
+ *  service (same host, so the CSP is unchanged) for a 200 px copy on a light background. */
+const PANDORA_THUMB = { sw: "200", sh: "200", sm: "fit", sfrm: "png", bgcolor: "F5F5F5" };
+
 /** A thumbnail only from a known store image host (the page's CSP enforces the same). */
 function thumb(url) {
-  let ok = false;
+  let src = null;
   try {
     const u = new URL(url);
-    ok = u.protocol === "https:" && (STATE?.image_hosts || []).includes(u.hostname);
-  } catch { ok = false; }
-  return ok
-    ? el("img", { class: "thumb", src: url, alt: "", loading: "lazy", referrerpolicy: "no-referrer", decoding: "async" })
+    if (u.protocol === "https:" && (STATE?.image_hosts || []).includes(u.hostname)) {
+      if (u.hostname === "us.pandora.net") for (const [k, v] of Object.entries(PANDORA_THUMB)) u.searchParams.set(k, v);
+      src = u.href;
+    }
+  } catch { src = null; }
+  return src
+    ? el("img", { class: "thumb", src, alt: "", loading: "lazy", referrerpolicy: "no-referrer", decoding: "async" })
     : el("span", { class: "thumb", "aria-hidden": "true" });
 }
 
@@ -378,7 +385,8 @@ async function suggest() {
       const picks = [s.base, ...s.addons].filter(Boolean);
       out.append(el("div", { class: "sugg" },
         el("div", { class: "head" }, el("span", {}, s.title), el("span", {}, `${money(s.total)}${s.savings > 0 ? ` (save ${money(s.savings)})` : ""}`)),
-        el("ul", {}, picks.map((p) => el("li", {}, webLink(p.url, p.name), ` ${money(p.price)}`, el("div", { class: "why" }, p.why)))),
+        el("ul", {}, picks.map((p) => el("li", {}, webLink(p.url, p.name), ` ${money(p.price)}`, el("div", { class: "why" }, p.why),
+          (p.policies || []).map((w) => el("div", { class: "policy" }, w))))),
         s.notes.map((n) => el("p", { class: "hint" }, n)),
         el("div", { class: "btns" }, el("button", { type: "button", class: "secondary small", onclick: () => useSuggestion(s) }, "Use this"))));
     }
