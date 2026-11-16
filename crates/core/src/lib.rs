@@ -149,6 +149,14 @@ mod tests {
         assert!(matches!(r.fit(Some("pandora-me-moments"), Some("pandora-moments")), rules::Fit::Yes { .. }));
         assert!(matches!(r.fit(Some("pandora-me"), Some("pandora-moments")), rules::Fit::No { .. }));
         assert!(matches!(r.fit(Some("pandora-reflexions"), Some("pandora-moments")), rules::Fit::No { .. }));
+        let other = |name: &str| {
+            let mut p = model::Product { store: "hardjewelry".into(), id: "1".into(), name: name.into(), ..Default::default() };
+            r.classify(&mut p);
+            p.kind.unwrap_or_default()
+        };
+        assert_eq!(other("MOTH HAIR CLIP"), "other", "a hair clip is not a charm clip");
+        assert_eq!(other("DYT MONEY CLIP"), "other");
+        assert_eq!(other("SKULL CHARM BRACELET"), "bracelet");
         assert_eq!(r.todo_count(), 0, "every shipped rule is sourced");
     }
 

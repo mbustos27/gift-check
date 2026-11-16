@@ -126,6 +126,14 @@ as_of = "2026-11-15"
 # ---------------------------------------------------------------- kinds: any store
 
 [[kind]]
+kind = "other"
+name_words = ["Hair Clip", "Money Clip", "Tie Clip", "Gift Card"]
+type_words = ["Clothing", "Poster", "Gift Card", "Engraving Ticket", "Wallet Chain", "Septum"]
+note = "Not charm-bracelet parts, even when named \"clip\". Before the clip rule."
+source = "word pattern (no external fact); names seen on hardjewelry.com 2026-11-15"
+as_of = "2026-11-15"
+
+[[kind]]
 kind = "safety-chain"
 name_words = ["Safety Chain"]
 source = "word pattern (no external fact)"
