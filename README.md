@@ -7,6 +7,15 @@ and sizing rules checked for you.
 
 A sibling of `buy-check`: same Rust workspace layout, same local-window security model.
 
+## Install (Windows)
+
+Download `gift-check-<version>-windows-x64.zip` from the
+[releases page](https://github.com/mbustos27/gift-check/releases), check it against
+`SHA256SUMS`, unzip it anywhere, and run `gift-check.exe ui` (or any command below) from that
+folder. It needs no installer and nothing besides Windows 10 or 11. Data is kept in
+`%APPDATA%\gift-check`. The zip also holds `capture\` (the browser capture script), `data\`
+(editable copies of the store and rule files) and the docs.
+
 ## What it never does
 
 - Sign in anywhere, read accounts, or touch carts, checkout or wishlists.
@@ -118,9 +127,14 @@ final-sale item only when nothing returnable fits, and says so) and notes. Each 
 Pandora facts cite the research report `2026-11-15-pandora-buying-guide.md`. A bracelet is a
 charm-bracelet base only when something names its system (Moments, a snake chain, a charm
 bangle, ME, Reflexions, or its collection): tennis, chain and cord bracelets are not. Add-ons no
-rule names fall back to Moments, marked inferred, and the planner says "check the product page". Edit the file and
-products are re-classified the next time gift-check starts. A copy in the data folder overrides
-the repository's.
+rule names fall back to Moments, marked inferred, and the planner says "check the product page".
+
+Where the rule files are read from (first match wins): `rules.toml` / `stores.toml` in the data
+folder (`%APPDATA%\gift-check`), then the folder named by `GIFT_CHECK_CONFIG_DIR`, then (debug
+builds only) the repository's `data` folder, then the copies built into the program. Edit a copy
+and products are re-classified the next time gift-check starts. Release builds don't look in the
+repository folder, so with a downloaded exe, copy the files from the release zip's `data` folder
+into `%APPDATA%\gift-check` (or point `GIFT_CHECK_CONFIG_DIR` at them) to change them.
 
 `data/stores.toml` is the store allowlist: origin, image hosts, source kind and the start
 URLs the bridge opens.
@@ -136,6 +150,9 @@ cargo clippy --all-targets -- -D warnings
 node --test "tests/js/*.test.js"   # capture script and bridge filter
 cargo build --release        # target\release\gift-check.exe
 ```
+
+For an exe you share, remap local paths so it doesn't contain them (Rust keeps source paths for
+error messages): `set RUSTFLAGS=--remap-path-prefix=%USERPROFILE%=~` before `cargo build --release`.
 
 Workspace: `crates/core` (storage, validation, rules, planner; no network), `crates/fetch` (the
 only network code), `crates/ui` (window and bridge), `crates/cli` (the `gift-check` binary).

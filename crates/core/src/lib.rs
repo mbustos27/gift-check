@@ -25,8 +25,27 @@ pub const UA_TOKEN: &str = "gift-check";
 
 const BUILT_IN_STORES: &str = include_str!("../../../data/stores.toml");
 const BUILT_IN_RULES: &str = include_str!("../../../data/rules.toml");
-/// The repository's `data` folder, so edits to the rule files take effect without a rebuild.
-const REPO_DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data");
+/// Debug builds also read the repository's `data` folder, so edits to the rule files take effect
+/// without a rebuild. Release builds don't carry this path: it would name folders on the machine
+/// that built them, and they are run on other machines. Use `GIFT_CHECK_CONFIG_DIR` instead.
+#[cfg(debug_assertions)]
+const REPO_DATA: Option<&str> = Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data"));
+#[cfg(not(debug_assertions))]
+const REPO_DATA: Option<&str> = None;
+
+/// Where `stores.toml` and `rules.toml` are looked for, first match wins: the data folder, then
+/// `GIFT_CHECK_CONFIG_DIR` if set, then (debug builds only) the repository's `data` folder.
+/// Nothing found means the copies built into the program.
+fn config_dirs(data_dir: &Path, config_dir_env: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut dirs = vec![data_dir.to_path_buf()];
+    if let Some(d) = config_dir_env.filter(|v| !v.is_empty()) {
+        dirs.push(PathBuf::from(d));
+    }
+    if let Some(d) = REPO_DATA {
+        dirs.push(PathBuf::from(d));
+    }
+    dirs
+}
 
 /// `%APPDATA%\gift-check` on Windows (`~/.local/share/gift-check` elsewhere).
 pub fn default_data_dir() -> Result<PathBuf, String> {
@@ -86,7 +105,7 @@ impl Config {
 }
 
 fn read_config(data_dir: &Path, name: &str, built_in: &str) -> Result<(String, String), String> {
-    for dir in [data_dir.to_path_buf(), PathBuf::from(REPO_DATA)] {
+    for dir in config_dirs(data_dir, std::env::var_os("GIFT_CHECK_CONFIG_DIR")) {
         let p = dir.join(name);
         if p.is_file() {
             let text = std::fs::read_to_string(&p).map_err(|e| format!("can't read {}: {e}", p.display()))?;
@@ -111,6 +130,17 @@ pub fn fingerprint(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_dirs_order_data_folder_then_env_then_repo_in_debug() {
+        let dirs = config_dirs(Path::new("D"), Some("E".into()));
+        assert_eq!(dirs[0], PathBuf::from("D"));
+        assert_eq!(dirs[1], PathBuf::from("E"));
+        // Tests are debug builds, so the repository folder comes last; release builds stop at E.
+        assert_eq!(dirs.len(), if cfg!(debug_assertions) { 3 } else { 2 });
+        // An empty variable is ignored.
+        assert_eq!(config_dirs(Path::new("D"), Some("".into())).len(), dirs.len() - 1);
+    }
 
     #[test]
     fn built_in_config_parses() {
