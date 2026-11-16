@@ -112,6 +112,12 @@ pub fn parse_http_date(s: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60 + sec)
 }
 
+/// The UTC time `hours` hours ago (negative: ahead), as RFC 3339 text. Tests use it so their
+/// captures stay inside the accepted age window whatever day they run.
+pub fn hours_ago_utc(hours: i64) -> String {
+    format_utc(now() - hours * 3600)
+}
+
 /// "45 s", "12 min", "3 h", "2 d" for a number of seconds.
 pub fn ago(secs: i64) -> String {
     let s = secs.max(0);

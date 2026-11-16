@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS product(
   engravable INTEGER, in_stock INTEGER, currency TEXT NOT NULL,
   price REAL, list_price REAL, price_at TEXT, image TEXT,
   first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_capture INTEGER, discontinued INTEGER NOT NULL DEFAULT 0,
+  listing TEXT, system_inferred INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(store, id));
 CREATE INDEX IF NOT EXISTS product_kind ON product(kind);
 CREATE TABLE IF NOT EXISTS variant(
@@ -48,9 +49,12 @@ CREATE TABLE IF NOT EXISTS recipient(
 CREATE TABLE IF NOT EXISTS gift_plan(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, recipient TEXT, budget REAL, items TEXT NOT NULL,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+-- Per host, across runs: when gift-check last asked it for anything (epoch ms), the spacing it
+-- used, and a Retry-After the host gave (epoch ms). Every fetch run starts by honouring these.
+CREATE TABLE IF NOT EXISTS host_state(host TEXT PRIMARY KEY, last_request_ms INTEGER, gap_ms INTEGER, retry_not_before_ms INTEGER);
 ";
 
-const COLS: &str = "store, id, name, url, category, kind, kind_given, system, metal, metal_group, metal_group_given, collection, themes, badges, tags, vendor, description, engravable, in_stock, currency, price, list_price, price_at, image, first_seen, last_seen, discontinued";
+const COLS: &str = "store, id, name, url, category, kind, kind_given, system, metal, metal_group, metal_group_given, collection, themes, badges, tags, vendor, description, engravable, in_stock, currency, price, list_price, price_at, image, first_seen, last_seen, discontinued, listing, system_inferred";
 
 fn e(err: rusqlite::Error) -> String {
     format!("database: {err}")
@@ -94,6 +98,8 @@ fn product_from_row(r: &Row) -> rusqlite::Result<Product> {
         first_seen: r.get(24)?,
         last_seen: r.get(25)?,
         discontinued: r.get::<_, i64>(26)? != 0,
+        listing: r.get(27)?,
+        system_inferred: r.get::<_, i64>(28)? != 0,
     })
 }
 
@@ -104,7 +110,7 @@ fn carry_over(p: &mut Product, old: Product) {
     macro_rules! keep {
         ($($f:ident),*) => { $( if p.$f.is_none() { p.$f = old.$f; } )* };
     }
-    keep!(category, metal, collection, vendor, description, engravable, in_stock, image, themes, badges);
+    keep!(category, listing, metal, collection, vendor, description, engravable, in_stock, image, themes, badges);
     if !p.kind_given && old.kind_given {
         p.kind = old.kind;
         p.kind_given = true;
@@ -133,8 +139,35 @@ pub enum Scope {
     None,
     /// The whole store (a full Shopify catalog fetch that reached the empty page).
     All,
-    /// Only products in these categories (a complete browser capture; `None` = no category).
-    Categories(Vec<Option<String>>),
+    /// Only products whose stored `listing` is one of these (a browser capture's
+    /// `complete_listings`). Categories never scope this: a product's category says nothing about
+    /// which listing pages a capture read.
+    Listings(Vec<String>),
+}
+
+/// A listing loses at most this share of its stored products to one capture; above it, the
+/// capture is suspect (a listing that drew half its tiles, a renamed listing) and marks nothing.
+pub const MAX_GONE_SHARE: f64 = 0.20;
+
+/// What closing a capture did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finished {
+    /// Distinct products the capture stored.
+    pub products: i64,
+    /// Products newly marked "not in the latest capture".
+    pub discontinued: i64,
+    /// The note stored on the capture (the caller's, plus why nothing was marked, if so).
+    pub note: Option<String>,
+    /// Why nothing was marked gone, when the safety limit held it back.
+    pub held: Option<String>,
+}
+
+/// Saved per host across fetch runs (times in Unix milliseconds).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostState {
+    pub last_request_ms: Option<u64>,
+    pub gap_ms: Option<u64>,
+    pub retry_not_before_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,15 +259,27 @@ impl Db {
     }
 
     fn init(conn: Connection) -> Result<Db, String> {
-        conn.execute_batch(SCHEMA).map_err(e)?;
-        let v: Option<String> = conn.query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0)).optional().map_err(e)?;
-        match v.as_deref().map(str::parse::<i64>) {
-            None => {
-                conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?1)", [SCHEMA_VERSION.to_string()]).map_err(e)?;
+        let v: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0))
+            .optional()
+            .or_else(|err| if err.to_string().contains("no such table") { Ok(None) } else { Err(err) })
+            .map_err(e)?;
+        if let Some(Ok(n)) = v.as_deref().map(str::parse::<i64>) {
+            if n > SCHEMA_VERSION {
+                return Err("this database was made by a newer gift-check; update gift-check".into());
             }
-            Some(Ok(n)) if n <= SCHEMA_VERSION => {}
-            Some(_) => return Err("this database was made by a newer gift-check; update gift-check".into()),
         }
+        conn.execute_batch(SCHEMA).map_err(e)?;
+        // Version 1 databases lack the product columns added in version 2.
+        let cols: Vec<String> = conn.prepare("SELECT name FROM pragma_table_info('product')").and_then(|mut st| st.query_map([], |r| r.get(0))?.collect()).map_err(e)?;
+        for (col, ddl) in [("listing", "ALTER TABLE product ADD COLUMN listing TEXT"), ("system_inferred", "ALTER TABLE product ADD COLUMN system_inferred INTEGER NOT NULL DEFAULT 0")] {
+            if !cols.iter().any(|c| c == col) {
+                conn.execute_batch(ddl).map_err(e)?;
+                // Products are re-classified (the inferred mark is new) on the next sync_rules.
+                conn.execute("DELETE FROM meta WHERE key='rules_hash'", []).map_err(e)?;
+            }
+        }
+        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [SCHEMA_VERSION.to_string()]).map_err(e)?;
         Ok(Db { conn })
     }
 
@@ -262,11 +307,14 @@ impl Db {
         let all = self.products_where("1=1", &[])?;
         let mut changed = 0;
         for mut p in all {
-            let before = (p.kind.clone(), p.metal_group.clone(), p.system.clone());
+            let before = (p.kind.clone(), p.metal_group.clone(), p.system.clone(), p.system_inferred);
             rules.classify(&mut p);
-            if before != (p.kind.clone(), p.metal_group.clone(), p.system.clone()) {
+            if before != (p.kind.clone(), p.metal_group.clone(), p.system.clone(), p.system_inferred) {
                 self.conn
-                    .execute("UPDATE product SET kind=?3, metal_group=?4, system=?5 WHERE store=?1 AND id=?2", params![p.store, p.id, p.kind, p.metal_group, p.system])
+                    .execute(
+                        "UPDATE product SET kind=?3, metal_group=?4, system=?5, system_inferred=?6 WHERE store=?1 AND id=?2",
+                        params![p.store, p.id, p.kind, p.metal_group, p.system, p.system_inferred],
+                    )
                     .map_err(e)?;
                 changed += 1;
             }
@@ -298,7 +346,7 @@ impl Db {
 
     fn get_product(&self, store: &str, id: &str) -> Result<Option<(Product, Option<i64>)>, String> {
         self.conn
-            .query_row(&format!("SELECT {COLS}, last_capture FROM product WHERE store=?1 AND id=?2"), [store, id], |r| Ok((product_from_row(r)?, r.get(27)?)))
+            .query_row(&format!("SELECT {COLS}, last_capture FROM product WHERE store=?1 AND id=?2"), [store, id], |r| Ok((product_from_row(r)?, r.get(29)?)))
             .optional()
             .map_err(e)
     }
@@ -306,10 +354,13 @@ impl Db {
     /// Stores products seen by one capture at time `at`: the product rows are updated, the
     /// variants replaced when the capture lists some, and one price observation per product and
     /// variant is appended (once per capture; a repeat within the same capture only fills gaps).
+    /// A capture older than what is stored for a product (its `last_seen` or `price_at`) never
+    /// overwrites it: the observation is added to the history and the row only gets gaps filled.
     pub fn store_products(&self, capture_id: i64, at: &str, products: &[Product], rules: &Rules) -> Result<usize, String> {
         let tx = self.conn.unchecked_transaction().map_err(e)?;
         for fresh in products {
             let existing = self.get_product(&fresh.store, &fresh.id)?;
+            let mut older = false;
             let mut p = match existing {
                 None => {
                     let mut p = fresh.clone();
@@ -323,6 +374,15 @@ impl Db {
                     crate::capture::fill(&mut old, fresh.clone());
                     old
                 }
+                // Times are all "YYYY-MM-DDTHH:MM:SSZ", so text order is time order.
+                Some((mut old, _)) if [&old.last_seen, &old.price_at].into_iter().flatten().any(|t| at < t.as_str()) => {
+                    older = true;
+                    old.variants = self.variants(&old.store, &old.id)?;
+                    let first = old.first_seen.clone();
+                    crate::capture::fill(&mut old, fresh.clone());
+                    old.first_seen = [first, Some(at.to_string())].into_iter().flatten().min();
+                    old
+                }
                 Some((old, _)) => {
                     let mut p = fresh.clone();
                     p.first_seen = old.first_seen.clone();
@@ -333,8 +393,10 @@ impl Db {
                     p
                 }
             };
-            p.last_seen = Some(at.to_string());
-            p.discontinued = false;
+            if !older {
+                p.last_seen = Some(at.to_string());
+                p.discontinued = false;
+            }
             rules.classify(&mut p);
             self.write_product(&p, capture_id)?;
             if !p.variants.is_empty() {
@@ -363,7 +425,7 @@ impl Db {
         self.conn
             .execute(
                 &format!(
-                    "INSERT OR REPLACE INTO product({COLS}, last_capture) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)"
+                    "INSERT OR REPLACE INTO product({COLS}, last_capture) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)"
                 ),
                 params![
                     p.store,
@@ -393,6 +455,8 @@ impl Db {
                     p.first_seen,
                     p.last_seen,
                     p.discontinued,
+                    p.listing,
+                    p.system_inferred,
                     capture_id
                 ],
             )
@@ -400,9 +464,11 @@ impl Db {
         Ok(())
     }
 
-    /// Closes a capture: counts what it stored and, when it was complete, marks the products in
-    /// its scope that it didn't see as discontinued. Returns (products, newly discontinued).
-    pub fn finish_capture(&self, capture_id: i64, complete: bool, scope: &Scope, note: Option<&str>) -> Result<(i64, i64), String> {
+    /// Closes a capture: counts what it stored and marks the products in its scope that it didn't
+    /// see as discontinued. `Scope::All` needs `complete`; `Scope::Listings` names the listings
+    /// that were read completely. When any listing would lose more than [`MAX_GONE_SHARE`] of its
+    /// stored products, nothing is marked and the capture gets a note saying so.
+    pub fn finish_capture(&self, capture_id: i64, complete: bool, scope: &Scope, note: Option<&str>) -> Result<Finished, String> {
         let (store, count): (String, i64) = self
             .conn
             .query_row(
@@ -412,27 +478,105 @@ impl Db {
             )
             .map_err(e)?;
         let mut gone = 0i64;
+        let mut notes: Vec<String> = note.map(str::to_string).into_iter().collect();
+        let mut held: Option<String> = None;
+        let unseen = "discontinued=0 AND store=?1 AND (last_capture IS NULL OR last_capture != ?2)";
         // Nothing seen means nothing to compare against: never mark a whole store gone.
-        if complete && count > 0 {
-            let unseen = "UPDATE product SET discontinued=1 WHERE store=?1 AND discontinued=0 AND (last_capture IS NULL OR last_capture != ?2)";
+        if count > 0 {
             match scope {
                 Scope::None => {}
-                Scope::All => gone += self.conn.execute(unseen, params![store, capture_id]).map_err(e)? as i64,
-                Scope::Categories(cats) => {
-                    for c in cats {
-                        let sql = format!("{unseen} AND IFNULL(category, '') = ?3");
-                        gone += self.conn.execute(&sql, params![store, capture_id, c.clone().unwrap_or_default()]).map_err(e)? as i64;
+                Scope::All if complete => {
+                    gone += self.conn.execute(&format!("UPDATE product SET discontinued=1 WHERE {unseen}"), params![store, capture_id]).map_err(e)? as i64;
+                }
+                Scope::All => {}
+                Scope::Listings(listings) => {
+                    let mut over = Vec::new();
+                    for l in listings {
+                        let (stored, missing): (i64, i64) = self
+                            .conn
+                            .query_row(
+                                &format!("SELECT COUNT(*), COALESCE(SUM(CASE WHEN {unseen} THEN 1 ELSE 0 END), 0) FROM product WHERE store=?1 AND discontinued=0 AND listing=?3"),
+                                params![store, capture_id, l],
+                                |r| Ok((r.get(0)?, r.get(1)?)),
+                            )
+                            .map_err(e)?;
+                        if missing as f64 > stored as f64 * MAX_GONE_SHARE {
+                            over.push(format!("{missing} of the {stored} stored products of listing {l:?}"));
+                        }
+                    }
+                    if over.is_empty() {
+                        for l in listings {
+                            gone += self.conn.execute(&format!("UPDATE product SET discontinued=1 WHERE {unseen} AND listing=?3"), params![store, capture_id, l]).map_err(e)? as i64;
+                        }
+                    } else {
+                        held = Some(format!(
+                            "nothing marked gone: this capture didn't include {}, more than the {:.0}% one capture may mark gone; check the listing before trusting it",
+                            over.join(", "),
+                            MAX_GONE_SHARE * 100.0
+                        ));
                     }
                 }
             }
         }
+        notes.extend(held.clone());
+        let note = (!notes.is_empty()).then(|| notes.join("; "));
         self.conn
             .execute(
                 "UPDATE capture SET finished_at=?2, product_count=?3, complete=?4, discontinued=?5, note=?6 WHERE id=?1",
                 params![capture_id, time::now_utc(), count, complete, gone, note],
             )
             .map_err(e)?;
-        Ok((count, gone))
+        Ok(Finished { products: count, discontinued: gone, note, held })
+    }
+
+    /// Closes every capture of `source` that is still open (a bridge capture whose chunks stopped
+    /// arriving when the window was closed) as incomplete. Nothing is marked discontinued.
+    pub fn close_open_captures(&self, source: &str, note: &str) -> Result<usize, String> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM capture WHERE source=?1 AND finished_at IS NULL")
+            .and_then(|mut st| st.query_map([source], |r| r.get(0))?.collect())
+            .map_err(e)?;
+        for id in &ids {
+            self.finish_capture(*id, false, &Scope::None, Some(note))?;
+        }
+        Ok(ids.len())
+    }
+
+    pub fn host_state(&self, host: &str) -> Result<HostState, String> {
+        let row = self
+            .conn
+            .query_row("SELECT last_request_ms, gap_ms, retry_not_before_ms FROM host_state WHERE host=?1", [host], |r| {
+                let n = |i: usize| r.get::<_, Option<i64>>(i).map(|v| v.map(|v| v.max(0) as u64));
+                Ok(HostState { last_request_ms: n(0)?, gap_ms: n(1)?, retry_not_before_ms: n(2)? })
+            })
+            .optional()
+            .map_err(e)?;
+        Ok(row.unwrap_or_default())
+    }
+
+    /// Records a request to `host` at `at_ms` made with spacing `gap_ms`.
+    pub fn note_request(&self, host: &str, at_ms: u64, gap_ms: u64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO host_state(host, last_request_ms, gap_ms) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(host) DO UPDATE SET last_request_ms=MAX(IFNULL(last_request_ms, 0), excluded.last_request_ms), gap_ms=excluded.gap_ms",
+                params![host, at_ms as i64, gap_ms as i64],
+            )
+            .map_err(e)?;
+        Ok(())
+    }
+
+    /// Records that `host` asked for no requests before `not_before_ms` (a Retry-After).
+    pub fn note_retry_after(&self, host: &str, not_before_ms: u64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO host_state(host, retry_not_before_ms) VALUES (?1, ?2)
+                 ON CONFLICT(host) DO UPDATE SET retry_not_before_ms=MAX(IFNULL(retry_not_before_ms, 0), excluded.retry_not_before_ms)",
+                params![host, not_before_ms as i64],
+            )
+            .map_err(e)?;
+        Ok(())
     }
 
     pub fn set_capture_sources(&self, capture_id: i64, sources: &[String]) -> Result<(), String> {
@@ -563,17 +707,29 @@ impl Db {
     }
 
     /// Price stats per kind for each store (`by = "store"`) or category (`by = "category"`).
-    pub fn compare(&self, by: &str) -> Result<Value, String> {
+    /// Prices in different currencies are never compared: with more than one currency stored,
+    /// `currency` must pick one.
+    pub fn compare(&self, by: &str, currency: Option<&str>) -> Result<Value, String> {
         let col = match by {
             "store" => "store",
             "category" => "IFNULL(category, '(none)')",
             _ => return Err("compare by store or category".into()),
         };
+        let currencies: Vec<String> = self
+            .conn
+            .prepare(&format!("SELECT DISTINCT currency FROM product WHERE discontinued = 0 AND {CUR} IS NOT NULL ORDER BY 1"))
+            .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
+            .map_err(e)?;
+        let currency = match currency {
+            Some(c) => c.to_string(),
+            None if currencies.len() > 1 => return Err(format!("prices are stored in {}; compare one currency at a time", currencies.join(" and "))),
+            None => currencies.first().cloned().unwrap_or_else(|| "USD".into()),
+        };
         let mut st = self
             .conn
-            .prepare(&format!("SELECT {col}, IFNULL(kind, '(unknown)'), {CUR}, list_price FROM product WHERE discontinued = 0 AND {CUR} IS NOT NULL ORDER BY 1, 2"))
+            .prepare(&format!("SELECT {col}, IFNULL(kind, '(unknown)'), {CUR}, list_price FROM product WHERE discontinued = 0 AND {CUR} IS NOT NULL AND currency = ?1 ORDER BY 1, 2"))
             .map_err(e)?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, Option<f64>>(3)?))).map_err(e)?;
+        let rows = st.query_map([&currency], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, Option<f64>>(3)?))).map_err(e)?;
         let mut cells: std::collections::BTreeMap<(String, String), Vec<(f64, bool)>> = Default::default();
         for row in rows {
             let (g, k, p, l) = row.map_err(e)?;
@@ -594,7 +750,7 @@ impl Db {
                 json!({ "group": g, "kind": k, "count": n, "min": v[0].0, "median": (median * 100.0).round() / 100.0, "max": v[n - 1].0, "on_sale": sale, "share_on_sale": (sale as f64 / n as f64 * 1000.0).round() / 1000.0 })
             })
             .collect();
-        Ok(json!({ "by": by, "groups": groups, "kinds": kinds, "stats": stats }))
+        Ok(json!({ "by": by, "currency": currency, "groups": groups, "kinds": kinds, "stats": stats }))
     }
 
     pub fn captures(&self, limit: usize) -> Result<Vec<CaptureRow>, String> {
@@ -684,9 +840,25 @@ impl Db {
         Ok(self.recipients()?.into_iter().find(|r| r.nick.eq_ignore_ascii_case(nick.trim())))
     }
 
+    /// Saves a plan with a snapshot of each item's current price and when that price was seen.
+    /// A plan mixing currencies is refused.
     pub fn save_plan(&self, plan: &GiftPlan) -> Result<i64, String> {
         let mut p = plan.clone();
         p.validate()?;
+        let mut currencies: Vec<String> = Vec::new();
+        for it in &mut p.items {
+            let found = self.get_product(&it.store, &it.id)?.map(|(prod, _)| prod);
+            it.saved_price = found.as_ref().and_then(Product::current);
+            it.saved_price_at = found.as_ref().and_then(|x| x.price_at.clone());
+            if let Some(c) = found.map(|x| x.currency) {
+                if !currencies.contains(&c) {
+                    currencies.push(c);
+                }
+            }
+        }
+        if currencies.len() > 1 {
+            return Err(format!("a plan can't mix currencies ({}); keep one store's currency per plan", currencies.join(" and ")));
+        }
         let now = time::now_utc();
         match p.id {
             Some(id) => {
@@ -823,32 +995,118 @@ mod tests {
         assert_eq!(db.capture_count(c).unwrap(), 1);
     }
 
+    fn listed(id: &str, listing: &str, category: &str) -> Product {
+        let mut p = charm(id, &format!("Charm {id}"), 50.0, 50.0);
+        p.listing = Some(listing.into());
+        p.category = Some(category.into());
+        p
+    }
+
     #[test]
-    fn complete_captures_mark_unseen_products_in_scope_only() {
+    fn complete_listings_mark_unseen_products_of_those_listings_only() {
+        let db = Db::memory().unwrap();
+        let r = rules();
+        let run = |at: &str, products: &[Product], scope: Scope| {
+            let c = db.begin_capture("pandora-us", "import", None, None, &[]).unwrap();
+            db.store_products(c, at, products, &r).unwrap();
+            db.finish_capture(c, true, &scope, None).unwrap()
+        };
+        let charms: Vec<Product> = (1..=6).map(|i| listed(&format!("79000{i}"), "charms", "charms")).collect();
+        // A bracelet read from the bracelets listing whose structured category says "charms".
+        let bracelet = listed("590702", "bracelets", "charms");
+        let mut all = charms.clone();
+        all.push(bracelet.clone());
+        run("2026-11-01T10:00:00Z", &all, Scope::Listings(vec!["charms".into(), "bracelets".into()]));
+
+        // A complete read of the bracelets listing says nothing about the charms listing, whatever
+        // the categories say (the old category scope marked every charm gone here).
+        let f = run("2026-11-02T10:00:00Z", std::slice::from_ref(&bracelet), Scope::Listings(vec!["bracelets".into()]));
+        assert_eq!((f.products, f.discontinued), (1, 0));
+        assert!(charms.iter().all(|c| !db.product("pandora-us", &c.id).unwrap().unwrap().discontinued));
+
+        // A partial capture marks nothing.
+        let c = db.begin_capture("pandora-us", "import", None, None, &[]).unwrap();
+        db.store_products(c, "2026-11-03T10:00:00Z", &charms[..1], &r).unwrap();
+        assert_eq!(db.finish_capture(c, false, &Scope::None, None).unwrap().discontinued, 0);
+
+        // A complete charms listing without one of its six charms (17%): that charm is gone.
+        let f = run("2026-11-04T10:00:00Z", &charms[..5], Scope::Listings(vec!["charms".into()]));
+        assert_eq!((f.products, f.discontinued, f.note, f.held), (5, 1, None, None));
+        assert!(db.product("pandora-us", "790006").unwrap().unwrap().discontinued);
+        assert!(!db.product("pandora-us", "590702").unwrap().unwrap().discontinued);
+        // Seen again later, it comes back.
+        run("2026-11-05T10:00:00Z", &charms, Scope::None);
+        assert!(!db.product("pandora-us", "790006").unwrap().unwrap().discontinued);
+
+        // Missing two of six (33%) is more than one capture may hide: nothing marked, a note instead.
+        let f = run("2026-11-06T10:00:00Z", &charms[..4], Scope::Listings(vec!["charms".into()]));
+        assert_eq!(f.discontinued, 0);
+        assert!(f.held.as_deref().unwrap().contains("2 of the 6 stored products of listing \"charms\""), "{:?}", f.held);
+        assert_eq!(db.captures(1).unwrap()[0].note, f.note, "the note is on the capture");
+        assert!(charms.iter().all(|c| !db.product("pandora-us", &c.id).unwrap().unwrap().discontinued));
+    }
+
+    #[test]
+    fn an_older_capture_adds_history_but_never_overwrites_newer_values() {
         let db = Db::memory().unwrap();
         let r = rules();
         let c1 = db.begin_capture("pandora-us", "import", None, None, &[]).unwrap();
-        let mut bracelet = charm("590702", "Snake Chain Bracelet", 80.0, 80.0);
-        bracelet.category = Some("bracelets".into());
-        db.store_products(c1, "2026-11-01T10:00:00Z", &[charm("1", "A Charm", 50.0, 50.0), charm("2", "B Charm", 50.0, 50.0), bracelet], &r).unwrap();
-        db.finish_capture(c1, true, &Scope::Categories(vec![Some("charms".into()), Some("bracelets".into())]), None).unwrap();
-
-        // A partial capture that only saw charm 1: nothing is marked.
+        db.store_products(c1, "2026-11-15T16:00:00Z", &[charm("794948C01", "Lucky Cat Charm", 68.0, 98.0)], &r).unwrap();
         let c2 = db.begin_capture("pandora-us", "import", None, None, &[]).unwrap();
-        db.store_products(c2, "2026-11-02T10:00:00Z", &[charm("1", "A Charm", 50.0, 50.0)], &r).unwrap();
-        assert_eq!(db.finish_capture(c2, false, &Scope::Categories(vec![Some("charms".into())]), None).unwrap(), (1, 0));
-        assert!(!db.product("pandora-us", "2").unwrap().unwrap().discontinued);
+        let mut old = charm("794948C01", "Lucky Cat Charm (old name)", 98.0, 98.0);
+        old.collection = Some("Disney".into());
+        db.store_products(c2, "2026-10-20T16:00:00Z", &[old], &r).unwrap();
+        let p = db.product("pandora-us", "794948C01").unwrap().unwrap();
+        assert_eq!((p.price, p.price_at.as_deref(), p.last_seen.as_deref()), (Some(68.0), Some("2026-11-15T16:00:00Z"), Some("2026-11-15T16:00:00Z")));
+        assert_eq!(p.name, "Lucky Cat Charm");
+        assert_eq!(p.collection.as_deref(), Some("Disney"), "gaps are still filled");
+        assert_eq!(p.first_seen.as_deref(), Some("2026-10-20T16:00:00Z"));
+        let h = db.history("pandora-us", "794948C01").unwrap();
+        assert_eq!(h.iter().map(|o| o.price).collect::<Vec<_>>(), vec![Some(98.0), Some(68.0)], "history is in time order");
+    }
 
-        // A complete capture of charms only: charm 2 is gone, the bracelet (other category) stays.
-        let c3 = db.begin_capture("pandora-us", "import", None, None, &[]).unwrap();
-        db.store_products(c3, "2026-11-03T10:00:00Z", &[charm("1", "A Charm", 50.0, 50.0)], &r).unwrap();
-        assert_eq!(db.finish_capture(c3, true, &Scope::Categories(vec![Some("charms".into())]), None).unwrap(), (1, 1));
-        assert!(db.product("pandora-us", "2").unwrap().unwrap().discontinued);
-        assert!(!db.product("pandora-us", "590702").unwrap().unwrap().discontinued);
-        // Seen again later, it comes back.
-        let c4 = db.begin_capture("pandora-us", "import", None, None, &[]).unwrap();
-        db.store_products(c4, "2026-11-04T10:00:00Z", &[charm("2", "B Charm", 45.0, 50.0)], &r).unwrap();
-        assert!(!db.product("pandora-us", "2").unwrap().unwrap().discontinued);
+    #[test]
+    fn plans_and_comparisons_never_mix_currencies() {
+        let db = Db::memory().unwrap();
+        let c = db.begin_capture("pandora-us", "import", None, None, &[]).unwrap();
+        let mut euro = charm("2", "Euro Charm", 20.0, 20.0);
+        euro.store = "eu-shop".into();
+        euro.currency = "EUR".into();
+        db.store_products(c, "2026-11-15T10:00:00Z", &[charm("1", "A Charm", 50.0, 50.0), euro], &rules()).unwrap();
+        let err = db.compare("store", None).unwrap_err();
+        assert!(err.contains("EUR and USD"), "{err}");
+        assert_eq!(db.compare("store", Some("EUR")).unwrap()["stats"][0]["group"], "eu-shop");
+        let item = |store: &str, id: &str| PlanItem { store: store.into(), id: id.into(), qty: 1, ..Default::default() };
+        let mixed = GiftPlan { name: "Mixed".into(), items: vec![item("pandora-us", "1"), item("eu-shop", "2")], ..Default::default() };
+        assert!(db.save_plan(&mixed).unwrap_err().contains("can't mix currencies"));
+        let one = GiftPlan { name: "One".into(), items: vec![item("pandora-us", "1")], ..Default::default() };
+        db.save_plan(&one).unwrap();
+        assert_eq!(db.plans().unwrap()[0].items[0].saved_price, Some(50.0), "the price is kept with the plan");
+    }
+
+    #[test]
+    fn host_state_keeps_the_latest_request_and_retry_time() {
+        let db = Db::memory().unwrap();
+        assert_eq!(db.host_state("a.example").unwrap(), HostState::default());
+        db.note_request("a.example", 5_000, 3_000).unwrap();
+        db.note_request("a.example", 4_000, 3_000).unwrap();
+        db.note_retry_after("a.example", 90_000).unwrap();
+        db.note_retry_after("a.example", 60_000).unwrap();
+        assert_eq!(db.host_state("a.example").unwrap(), HostState { last_request_ms: Some(5_000), gap_ms: Some(3_000), retry_not_before_ms: Some(90_000) });
+    }
+
+    #[test]
+    fn a_version_1_database_is_upgraded() {
+        let conn = Connection::open_in_memory().unwrap();
+        let v1 = SCHEMA.replace("  listing TEXT, system_inferred INTEGER NOT NULL DEFAULT 0,\n", "");
+        conn.execute_batch(&v1).unwrap();
+        conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '1'), ('rules_hash', 'old')", []).unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("2"));
+        assert_eq!(db.meta("rules_hash").unwrap(), None, "products get re-classified");
+        let c = db.begin_capture("pandora-us", "import", None, None, &[]).unwrap();
+        db.store_products(c, "2026-11-15T10:00:00Z", &[listed("790001", "charms", "charms")], &rules()).unwrap();
+        assert_eq!(db.product("pandora-us", "790001").unwrap().unwrap().listing.as_deref(), Some("charms"));
     }
 
     #[test]
@@ -883,7 +1141,7 @@ mod tests {
         let all = db.recipients().unwrap();
         assert_eq!(all.len(), 1, "nicknames are case-insensitive: an edit, not a second person");
         assert_eq!(all[0].likes, vec!["dogs"]);
-        let id = db.save_plan(&GiftPlan { name: "Xmas".into(), items: vec![PlanItem { store: "pandora-us".into(), id: "1".into(), qty: 1 }], ..Default::default() }).unwrap();
+        let id = db.save_plan(&GiftPlan { name: "Xmas".into(), items: vec![PlanItem { store: "pandora-us".into(), id: "1".into(), qty: 1, ..Default::default() }], ..Default::default() }).unwrap();
         assert_eq!(db.plans().unwrap()[0].id, Some(id));
         assert!(db.delete_plan(id).unwrap());
         assert!(db.plans().unwrap().is_empty());

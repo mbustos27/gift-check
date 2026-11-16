@@ -2,7 +2,7 @@
 //! pacing and waiting can be tested without waiting.
 
 use std::cell::{Cell, RefCell};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Response {
@@ -23,24 +23,18 @@ pub trait Transport {
 }
 
 pub trait Clock {
+    /// Unix milliseconds.
     fn now_ms(&self) -> u64;
     fn sleep_ms(&self, ms: u64);
 }
 
-/// Real time, measured from when the clock was made.
-pub struct SystemClock {
-    start: Instant,
-}
-
-impl Default for SystemClock {
-    fn default() -> Self {
-        SystemClock { start: Instant::now() }
-    }
-}
+/// Wall-clock time, so the spacing between requests to a host holds across runs too.
+#[derive(Default)]
+pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
-        self.start.elapsed().as_millis() as u64
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
     }
     fn sleep_ms(&self, ms: u64) {
         std::thread::sleep(Duration::from_millis(ms));
@@ -52,6 +46,13 @@ impl Clock for SystemClock {
 pub struct FakeClock {
     now: Cell<u64>,
     pub sleeps: RefCell<Vec<u64>>,
+}
+
+impl FakeClock {
+    /// A fake clock that starts at `ms`.
+    pub fn at(ms: u64) -> FakeClock {
+        FakeClock { now: Cell::new(ms), sleeps: RefCell::new(Vec::new()) }
+    }
 }
 
 impl Clock for FakeClock {

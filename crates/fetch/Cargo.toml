@@ -8,6 +8,7 @@ description = "Polite Shopify catalog fetcher for gift-check: robots.txt, 3 s pe
 [dependencies]
 gift_check_core = { path = "../core" }
 ureq.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tiny_http.workspace = true

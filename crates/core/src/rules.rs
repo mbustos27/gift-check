@@ -83,7 +83,13 @@ pub struct SystemRule {
     pub badge_words: Vec<String>,
     #[serde(default)]
     pub id_prefix: Vec<String>,
-    /// Applies to the store's products of these kinds when no other system rule matched.
+    /// When set, a match also needs one of these words in the name, collection or category
+    /// ("Bangle" only names a Moments bangle when the name also says "Charm" or "Moments").
+    #[serde(default)]
+    pub context_words: Vec<String>,
+    /// Applies to the store's products of these kinds when no other system rule matched. Never to
+    /// base kinds (bracelets): a bracelet is a charm-bracelet base only when something names its
+    /// system. A system from a fallback is marked inferred.
     #[serde(default)]
     pub fallback: bool,
     #[serde(default)]
@@ -340,20 +346,26 @@ impl Rules {
         None
     }
 
-    pub fn system_of(&self, p: &Product) -> Option<String> {
+    /// The product's compatibility system, and whether it was only inferred (from a fallback).
+    pub fn system_of(&self, p: &Product) -> Option<(String, bool)> {
         let kind = p.kind.as_deref()?;
         let applies = |r: &SystemRule| store_matches(&r.store, &p.store) && (r.kinds.is_empty() || r.kinds.iter().any(|k| k == kind));
         let badges = p.badges.as_deref().unwrap_or_default();
+        let context = [Some(p.name.as_str()), p.collection.as_deref(), p.category.as_deref()];
         for r in self.systems.iter().filter(|r| !r.fallback && applies(r)) {
             let hit = any_words(&p.name, &r.name_words)
                 || p.collection.as_deref().is_some_and(|c| any_words(c, &r.collection_words))
                 || badges.iter().any(|b| any_words(b, &r.badge_words))
                 || r.id_prefix.iter().any(|x| id_has_prefix(&p.id, x));
-            if hit {
-                return Some(r.id.clone());
+            let in_context = r.context_words.is_empty() || context.iter().flatten().any(|t| any_words(t, &r.context_words));
+            if hit && in_context {
+                return Some((r.id.clone(), false));
             }
         }
-        self.systems.iter().find(|r| r.fallback && applies(r)).map(|r| r.id.clone())
+        if self.is_base(Some(kind)) {
+            return None;
+        }
+        self.systems.iter().find(|r| r.fallback && applies(r)).map(|r| (r.id.clone(), true))
     }
 
     /// Kind, metal group and system from the rules, leaving what the store said alone.
@@ -364,7 +376,9 @@ impl Rules {
         if !p.metal_group_given {
             p.metal_group = self.metal_group_of(p);
         }
-        p.system = self.system_of(p);
+        let system = self.system_of(p);
+        p.system_inferred = system.as_ref().is_some_and(|(_, inferred)| *inferred);
+        p.system = system.map(|(s, _)| s);
     }
 
     pub fn fit(&self, addon_system: Option<&str>, base_system: Option<&str>) -> Fit {
@@ -505,6 +519,24 @@ as_of = "2026-11-15"
 id = "pandora-moments"
 label = "Pandora Moments"
 store = "pandora-us"
+name_words = ["Moments", "Snake Chain"]
+source = "test"
+as_of = "2026-11-15"
+
+[[system]]
+id = "pandora-moments"
+label = "Pandora Moments"
+store = "pandora-us"
+kinds = ["bracelet"]
+name_words = ["Bangle", "T-Bar", "Slider"]
+context_words = ["Charm", "Moments"]
+source = "test"
+as_of = "2026-11-15"
+
+[[system]]
+id = "pandora-moments"
+label = "Pandora Moments"
+store = "pandora-us"
 kinds = ["charm", "bracelet", "clip", "spacer", "safety-chain"]
 fallback = true
 source = "test"
@@ -595,6 +627,29 @@ limits = { clip = 2, safety-chain = 1 }
         given.kind_given = true;
         r.classify(&mut given);
         assert_eq!(given.kind.as_deref(), Some("necklace"));
+    }
+
+    #[test]
+    fn bracelets_need_a_named_system_and_fallbacks_are_marked_inferred() {
+        let r = rules();
+        let sys = |name: &str| {
+            let mut p = pandora("590000", name);
+            r.classify(&mut p);
+            (p.kind.unwrap_or_default(), p.system, p.system_inferred)
+        };
+        // The fallback system never makes a bracelet a charm-bracelet base.
+        assert_eq!(sys("Timeless Pave Single-row Tennis Bracelet"), ("bracelet".into(), None, false));
+        assert_eq!(sys("Sparkling Slider Tennis Bracelet"), ("bracelet".into(), None, false), "Slider needs a charm context");
+        assert_eq!(sys("Signature Bangle"), ("bracelet".into(), None, false));
+        assert_eq!(sys("Pandora Moments Snake Chain Bracelet"), ("bracelet".into(), Some("pandora-moments".into()), false));
+        assert_eq!(sys("Heart Clasp Charm Bangle"), ("bracelet".into(), Some("pandora-moments".into()), false));
+        // Add-ons still get the fallback, marked as a guess.
+        let mut charm = pandora("790001", "Lucky Cat Dangle Charm");
+        r.classify(&mut charm);
+        assert_eq!((charm.system.as_deref(), charm.system_inferred), (Some("pandora-moments"), true));
+        let mut named = pandora("790002", "Pandora Moments Disney Charm");
+        r.classify(&mut named);
+        assert_eq!((named.system.as_deref(), named.system_inferred), (Some("pandora-moments"), false));
     }
 
     #[test]

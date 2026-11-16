@@ -17,6 +17,10 @@ pub const MAX_CHUNK_PRODUCTS: usize = 5_000;
 pub const MAX_CHUNKS: u32 = 500;
 pub const MAX_PRICE: f64 = 1_000_000.0;
 pub const MESSAGE_TYPE: &str = "gift-check-capture";
+/// A capture older than this is refused unless forced (`gift-check import --force`).
+pub const MAX_AGE_DAYS: i64 = 30;
+/// Notes kept per capture; the rest are counted.
+const MAX_WARNINGS: usize = 50;
 
 /// A validated capture (or one chunk of one).
 #[derive(Debug, Clone, PartialEq)]
@@ -25,6 +29,9 @@ pub struct Capture {
     pub origin: String,
     pub captured_at: String,
     pub complete: bool,
+    /// Listings every product of which was read; products stored from one of these listings that
+    /// the capture didn't include are marked "not in the latest capture".
+    pub complete_listings: Vec<String>,
     pub sources: Vec<String>,
     pub products: Vec<Product>,
     /// Products that appeared more than once and were merged into one.
@@ -79,6 +86,8 @@ struct RawProduct {
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
+    listing: Option<String>,
+    #[serde(default)]
     kind: Option<String>,
     #[serde(default)]
     metal: Option<String>,
@@ -112,12 +121,17 @@ pub fn valid_product_id(s: &str) -> bool {
 
 /// Parses and validates a whole capture file's text.
 pub fn validate_text(text: &str, stores: &Stores) -> Result<Capture, String> {
+    validate_file(text, stores, false)
+}
+
+/// Like [`validate_text`]; `force` lets a capture older than [`MAX_AGE_DAYS`] in.
+pub fn validate_file(text: &str, stores: &Stores, force: bool) -> Result<Capture, String> {
     if text.len() as u64 > MAX_FILE_BYTES {
         return Err(format!("the capture is {} MB; the limit is 50 MB", text.len() / (1024 * 1024)));
     }
     let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map_err(|e| format!("the capture isn't valid JSON ({e}). NaN, Infinity and comments aren't allowed in JSON."))?;
-    let c = validate_value(&v, stores, MAX_PRODUCTS)?;
+    let c = check(&v, stores, MAX_PRODUCTS, force)?;
     if c.chunk.as_ref().is_some_and(|k| k.chunks > 1) {
         return Err("this is one chunk of a bridge capture; import needs the whole capture in one file".into());
     }
@@ -126,6 +140,24 @@ pub fn validate_text(text: &str, stores: &Stores) -> Result<Capture, String> {
 
 /// Validates a parsed capture or bridge chunk. `max_products` bounds this one message.
 pub fn validate_value(v: &Value, stores: &Stores, max_products: usize) -> Result<Capture, String> {
+    check(v, stores, max_products, false)
+}
+
+/// Adds a note, keeping at most [`MAX_WARNINGS`] and counting the rest in the last one.
+fn warn(warnings: &mut Vec<String>, w: String) {
+    match warnings.len() {
+        n if n < MAX_WARNINGS => warnings.push(w),
+        n if n == MAX_WARNINGS => warnings.push("1 more note".into()),
+        _ => {
+            if let Some(last) = warnings.last_mut() {
+                let n: usize = last.split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(1);
+                *last = format!("{} more notes", n + 1);
+            }
+        }
+    }
+}
+
+fn check(v: &Value, stores: &Stores, max_products: usize, force: bool) -> Result<Capture, String> {
     let obj = v.as_object().ok_or("the capture must be a JSON object")?;
     match obj.get("schema") {
         None => return Err("the capture has no \"schema\" field; this gift-check reads schema 1".into()),
@@ -139,23 +171,41 @@ pub fn validate_value(v: &Value, stores: &Stores, max_products: usize) -> Result
     }
     let field = |k: &str| obj.get(k).and_then(Value::as_str).map(str::trim);
     let store_id = field("store").ok_or("the capture needs \"store\" (a store id from data/stores.toml)")?;
-    let store = stores.get(store_id).ok_or_else(|| {
-        let known: Vec<&str> = stores.stores.iter().map(|s| s.id.as_str()).collect();
-        format!("unknown store {store_id:?}; known stores: {}", known.join(", "))
-    })?;
+    // The bridge hands this message back to the store tab, so it names no other store.
+    let store = stores.get(store_id).ok_or_else(|| format!("unknown store {:?} (not in gift-check's stores.toml)", crate::text::truncate(store_id, 40)))?;
     let origin = field("origin").ok_or("the capture needs \"origin\"")?;
     if origin.trim_end_matches('/') != store.origin {
         return Err(format!("origin {origin:?} doesn't match {}'s origin {}", store.id, store.origin));
     }
     let captured_at = field("captured_at").ok_or("the capture needs \"captured_at\" (like 2026-11-15T16:00:00Z)")?;
     let at = crate::time::parse_rfc3339(captured_at).ok_or_else(|| format!("captured_at {captured_at:?} isn't an RFC 3339 time like 2026-11-15T16:00:00Z"))?;
-    if at > crate::time::now() + 86_400 {
+    let now = crate::time::now();
+    if at > now + 86_400 {
         return Err(format!("captured_at {captured_at} is in the future"));
+    }
+    if !force && at < now - MAX_AGE_DAYS * 86_400 {
+        return Err(format!(
+            "captured_at {captured_at} is more than {MAX_AGE_DAYS} days ago; an old capture only adds old history (gift-check import --force takes it anyway)"
+        ));
     }
     let complete = match obj.get("complete") {
         None | Some(Value::Null) => false,
         Some(Value::Bool(b)) => *b,
         Some(_) => return Err("\"complete\" must be true or false".into()),
+    };
+    let complete_listings = match obj.get("complete_listings") {
+        None | Some(Value::Null) => vec![],
+        Some(Value::Array(a)) if a.len() <= 100 => {
+            let mut out: Vec<String> = Vec::new();
+            for l in a {
+                let l = text_field(l.as_str().map(str::to_string), "a complete listing", 64)?.ok_or("\"complete_listings\" holds listing names (text)")?;
+                if !out.contains(&l) {
+                    out.push(l);
+                }
+            }
+            out
+        }
+        Some(_) => return Err("\"complete_listings\" must be a list of at most 100 listing names".into()),
     };
     let chunk = chunk_of(obj)?;
 
@@ -189,7 +239,7 @@ pub fn validate_value(v: &Value, stores: &Stores, max_products: usize) -> Result
     let mut warnings = Vec::new();
     let mut merged = 0;
     for (i, pv) in raw.iter().enumerate() {
-        let p = product(pv, store).map_err(|e| {
+        let p = product(pv, store, &mut warnings).map_err(|e| {
             let id = pv.get("id").map(|v| v.to_string()).unwrap_or_else(|| "?".into());
             format!("product #{} (id {}): {e}", i + 1, crate::text::truncate(&id, 70))
         })?;
@@ -197,16 +247,16 @@ pub fn validate_value(v: &Value, stores: &Stores, max_products: usize) -> Result
             Some(first) => {
                 merged += 1;
                 if let Some(w) = merge_duplicate(first, p) {
-                    warnings.push(w);
+                    warn(&mut warnings, w);
                 }
             }
             None => products.push(p),
         }
     }
-    if complete && products.is_empty() && chunk.as_ref().is_none_or(|k| k.chunks == 1) {
+    if (complete || !complete_listings.is_empty()) && products.is_empty() && chunk.as_ref().is_none_or(|k| k.chunks == 1) {
         return Err("a complete capture with no products would mark the whole store discontinued; refusing it".into());
     }
-    Ok(Capture { store: store.id.clone(), origin: store.origin.clone(), captured_at: crate::time::format_utc(at), complete, sources, products, merged, warnings, chunk })
+    Ok(Capture { store: store.id.clone(), origin: store.origin.clone(), captured_at: crate::time::format_utc(at), complete, complete_listings, sources, products, merged, warnings, chunk })
 }
 
 fn chunk_of(obj: &serde_json::Map<String, Value>) -> Result<Option<Chunk>, String> {
@@ -256,7 +306,7 @@ fn price_field(v: Option<f64>, what: &str) -> Result<Option<f64>, String> {
     }
 }
 
-fn product(v: &Value, store: &StoreCfg) -> Result<Product, String> {
+fn product(v: &Value, store: &StoreCfg, warnings: &mut Vec<String>) -> Result<Product, String> {
     let r: RawProduct = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
     let id = r.id.text();
     if !valid_product_id(&id) {
@@ -276,10 +326,12 @@ fn product(v: &Value, store: &StoreCfg) -> Result<Product, String> {
         Some(c) => return Err(format!("currency {c:?}: {}'s prices are in {}", store.id, store.currency)),
         None => store.currency.clone(),
     };
+    // An image elsewhere is dropped (the window would never load it), not the whole message.
     let image = match r.image.filter(|s| !s.trim().is_empty()) {
         Some(u) if store.allows_image(&u) => Some(u),
         Some(u) => {
-            return Err(format!("image {:?} must be https on {} or one of its image hosts ({})", crate::text::truncate(&u, 120), store.host(), store.image_hosts.join(", ")));
+            warn(warnings, format!("{id}: image {:?} isn't https on {} or one of its image hosts; dropped", crate::text::truncate(&u, 80), store.host()));
+            None
         }
         None => None,
     };
@@ -307,15 +359,24 @@ fn product(v: &Value, store: &StoreCfg) -> Result<Product, String> {
         });
     }
     let metal_group = text_field(r.metal_group, "metal_group", 64)?;
+    let price = price_field(r.price, "price")?;
+    let list_price = price_field(r.list_price, "list_price")?;
+    if let (Some(p), Some(l)) = (price, list_price) {
+        if p - l >= 0.005 {
+            warn(warnings, format!("{id}: price {p:.2} is above its list price {l:.2}; a label (such as \"$812 VALUE\") may have been read as the price"));
+        }
+    }
     Ok(Product {
         store: store.id.clone(),
         id,
         name,
         url: r.url,
         category: text_field(r.category, "category", 64)?,
+        listing: text_field(r.listing, "listing", 64)?,
         kind_given: kind.is_some(),
         kind,
         system: None,
+        system_inferred: false,
         metal: text_field(r.metal, "metal", 100)?,
         metal_group_given: metal_group.is_some(),
         metal_group,
@@ -328,8 +389,8 @@ fn product(v: &Value, store: &StoreCfg) -> Result<Product, String> {
         engravable: r.engravable,
         in_stock: r.in_stock,
         currency,
-        price: price_field(r.price, "price")?,
-        list_price: price_field(r.list_price, "list_price")?,
+        price,
+        list_price,
         price_at: None,
         image,
         variants,
@@ -351,15 +412,16 @@ pub struct Stored {
     pub warnings: Vec<String>,
 }
 
-/// The categories a capture covers; a complete capture only speaks for these.
-pub fn categories(products: &[Product]) -> Vec<Option<String>> {
-    let mut out: Vec<Option<String>> = Vec::new();
-    for p in products {
-        if !out.contains(&p.category) {
-            out.push(p.category.clone());
-        }
+/// What a finished capture may mark gone: only products of its complete listings. A capture that
+/// says `complete` but names no complete listing marks nothing (and says so in `notes`).
+pub fn scope(complete: bool, complete_listings: &[String], notes: &mut Vec<String>) -> crate::db::Scope {
+    if !complete_listings.is_empty() {
+        return crate::db::Scope::Listings(complete_listings.to_vec());
     }
-    out
+    if complete {
+        notes.push("complete, but no complete_listings named: nothing marked gone (see docs/CAPTURE.md)".into());
+    }
+    crate::db::Scope::None
 }
 
 /// Stores a whole validated capture as one capture row (used by `import`).
@@ -368,10 +430,12 @@ pub fn store(db: &crate::db::Db, cfg: &crate::Config, c: &Capture, source: &str)
     db.upsert_store(s)?;
     let id = db.begin_capture(&c.store, source, None, Some(&c.captured_at), &c.sources)?;
     db.store_products(id, &c.captured_at, &c.products, &cfg.rules)?;
-    let scope = if c.complete { crate::db::Scope::Categories(categories(&c.products)) } else { crate::db::Scope::None };
-    let note = (!c.warnings.is_empty()).then(|| c.warnings.join("; "));
-    let (products, discontinued) = db.finish_capture(id, c.complete, &scope, note.as_deref())?;
-    Ok(Stored { capture_id: id, store: c.store.clone(), products, discontinued, complete: c.complete, merged: c.merged, warnings: c.warnings.clone() })
+    let mut notes = c.warnings.clone();
+    let scope = scope(c.complete, &c.complete_listings, &mut notes);
+    let note = (!notes.is_empty()).then(|| notes.join("; "));
+    let f = db.finish_capture(id, c.complete, &scope, note.as_deref())?;
+    notes.extend(f.held);
+    Ok(Stored { capture_id: id, store: c.store.clone(), products: f.products, discontinued: f.discontinued, complete: c.complete, merged: c.merged, warnings: notes })
 }
 
 /// Merges a later sighting of the same product into the first one: the first sighting's values
@@ -391,7 +455,7 @@ pub fn fill(into: &mut Product, from: Product) {
     macro_rules! keep_or {
         ($($f:ident),*) => { $( if into.$f.is_none() { into.$f = from.$f; } )* };
     }
-    keep_or!(category, metal, collection, vendor, description, engravable, in_stock, image);
+    keep_or!(category, listing, metal, collection, vendor, description, engravable, in_stock, image);
     if into.kind.is_none() && from.kind_given {
         into.kind = from.kind;
         into.kind_given = true;
@@ -444,12 +508,12 @@ mod tests {
     fn good() -> Value {
         json!({
             "schema": 1, "store": "pandora-us", "origin": "https://us.pandora.net",
-            "captured_at": "2026-11-15T16:00:00Z", "complete": true,
+            "captured_at": crate::time::hours_ago_utc(2), "complete": true, "complete_listings": ["charms"],
             "sources": ["https://us.pandora.net/en/charms/?page=2"],
             "unknown_field": {"ignored": true},
             "products": [
                 { "id": "794948C01", "name": "Lucky Cat Charm", "url": "https://us.pandora.net/en/charms/lucky-cat/794948C01.html",
-                  "category": "charms", "kind": "charm", "metal": "Sterling silver", "metal_group": "Silver",
+                  "category": "charms", "listing": "charms", "kind": "charm", "metal": "Sterling silver", "metal_group": "Silver",
                   "themes": ["cats", "luck"], "badges": ["NEW"], "engravable": false, "in_stock": true, "currency": "USD",
                   "list_price": 98.0, "price": 68.0, "image": "https://us.pandora.net/dw/image/v2/x.jpg",
                   "variants": [{"id": "794948C01", "title": "One size", "price": 68, "list_price": 98, "available": true}],
@@ -480,9 +544,12 @@ mod tests {
         let mut v = good();
         v["products"][0]["url"] = json!("http://us.pandora.net/en/x.html");
         assert!(check(v).is_err(), "plain http");
+        // An off-host image is dropped with a note; the rest of the message is kept.
         let mut v = good();
         v["products"][0]["image"] = json!("https://images.evil.example/x.jpg");
-        assert!(check(v).unwrap_err().contains("image"));
+        let c = check(v).unwrap();
+        assert_eq!(c.products[0].image, None);
+        assert!(c.warnings.iter().any(|w| w.contains("images.evil.example") && w.contains("dropped")), "{:?}", c.warnings);
         let mut v = good();
         v["origin"] = json!("https://evil.example");
         assert!(check(v).unwrap_err().contains("doesn't match"));
@@ -568,6 +635,8 @@ mod tests {
         v["products"] = json!([]);
         assert!(check(v.clone()).unwrap_err().contains("discontinued"));
         v["complete"] = json!(false);
+        assert!(check(v.clone()).is_err(), "complete listings with no products would mark them all gone");
+        v["complete_listings"] = json!([]);
         assert!(check(v).is_ok(), "an empty partial capture is harmless");
         let mut v = good();
         v["capture_id"] = json!("abcdefgh12");
@@ -581,35 +650,118 @@ mod tests {
     }
 
     #[test]
-    fn importing_twice_keeps_history_and_complete_false_discontinues_nothing() {
+    fn importing_twice_keeps_history_and_only_complete_listings_mark_gone() {
         let cfg = crate::Config::built_in().unwrap();
         let db = crate::db::Db::memory().unwrap();
         let mut v = good();
-        let mut other = v["products"][0].clone();
-        other["id"] = json!("791088");
-        other["name"] = json!("Band of Hearts Safety Chain Clip Charm");
-        v["products"].as_array_mut().unwrap().push(other);
+        let base = v["products"][0].clone();
+        let products = v["products"].as_array_mut().unwrap();
+        for (id, name) in [("791088", "Band of Hearts Safety Chain Clip Charm"), ("790001", "A Charm"), ("790002", "B Charm"), ("790003", "C Charm"), ("790004", "D Charm")] {
+            let mut p = base.clone();
+            p["id"] = json!(id);
+            p["name"] = json!(name);
+            products.push(p);
+        }
         let first = store(&db, &cfg, &check(v.clone()).unwrap(), "import").unwrap();
-        assert_eq!((first.products, first.discontinued), (2, 0));
+        assert_eq!((first.products, first.discontinued), (6, 0));
         assert_eq!(db.product("pandora-us", "791088").unwrap().unwrap().kind.as_deref(), Some("charm"), "the capture said charm");
 
-        // A later partial capture that lacks 791088 and has a new price.
-        let mut later = good();
+        // A later partial capture that lacks 791088 and has a new price, written with an offset.
+        let mut later = v.clone();
+        later["products"].as_array_mut().unwrap().retain(|p| p["id"] != "791088");
         later["complete"] = json!(false);
-        later["captured_at"] = json!("2026-11-15T18:00:00+01:00");
+        later["complete_listings"] = json!([]);
+        let utc = crate::time::now() - 3600;
+        later["captured_at"] = json!(crate::time::format_utc(utc + 3600).replace('Z', "+01:00"));
         later["products"][0]["price"] = json!(58.0);
         let second = store(&db, &cfg, &check(later.clone()).unwrap(), "import").unwrap();
-        assert_eq!((second.products, second.discontinued), (1, 0));
-        assert!(!db.product("pandora-us", "791088").unwrap().unwrap().discontinued, "complete:false marks nothing missing");
+        assert_eq!((second.products, second.discontinued), (5, 0));
+        assert!(!db.product("pandora-us", "791088").unwrap().unwrap().discontinued, "a partial capture marks nothing missing");
         let h = db.history("pandora-us", "794948C01").unwrap();
         assert_eq!(h.iter().map(|o| o.price).collect::<Vec<_>>(), vec![Some(68.0), Some(58.0)]);
-        assert_eq!(h[1].at, "2026-11-15T17:00:00Z", "times are stored as UTC");
+        assert_eq!(h[1].at, crate::time::format_utc(utc), "times are stored as UTC");
 
-        // The same capture complete: now the missing charm is marked.
+        // "complete" alone no longer scopes anything: nothing is marked, and the capture says why.
         later["complete"] = json!(true);
-        let third = store(&db, &cfg, &check(later).unwrap(), "import").unwrap();
-        assert_eq!(third.discontinued, 1);
+        let third = store(&db, &cfg, &check(later.clone()).unwrap(), "import").unwrap();
+        assert_eq!(third.discontinued, 0);
+        assert!(third.warnings.iter().any(|w| w.contains("no complete_listings")), "{:?}", third.warnings);
+        // With the charms listing named complete, the missing charm (1 of 6) is marked.
+        later["complete_listings"] = json!(["charms"]);
+        let fourth = store(&db, &cfg, &check(later).unwrap(), "import").unwrap();
+        assert_eq!(fourth.discontinued, 1);
         assert!(db.product("pandora-us", "791088").unwrap().unwrap().discontinued);
+    }
+
+    #[test]
+    fn old_and_future_captures_are_refused() {
+        let mut v = good();
+        v["captured_at"] = json!(crate::time::hours_ago_utc(31 * 24));
+        let text = v.to_string();
+        assert!(validate_text(&text, &stores()).unwrap_err().contains("more than 30 days ago"));
+        assert!(validate_value(&v, &stores(), MAX_CHUNK_PRODUCTS).is_err(), "the bridge never takes an old capture");
+        assert!(validate_file(&text, &stores(), true).is_ok(), "import --force takes it");
+        v["captured_at"] = json!("0001-01-01T00:00:00Z");
+        assert!(check(v.clone()).is_err());
+        v["captured_at"] = json!(crate::time::hours_ago_utc(-25));
+        assert!(check(v.clone()).unwrap_err().contains("in the future"));
+        v["captured_at"] = json!(crate::time::hours_ago_utc(-23));
+        assert!(check(v).is_ok(), "up to a day ahead (a clock a little off) is fine");
+    }
+
+    #[test]
+    fn limits_on_prices_and_badges() {
+        let mut v = good();
+        v["products"][0]["price"] = json!(MAX_PRICE + 0.01);
+        assert!(check(v).unwrap_err().contains("price must be a number from 0 to"));
+        let mut v = good();
+        v["products"][0]["list_price"] = json!(MAX_PRICE);
+        assert!(check(v).is_ok(), "the limit itself is allowed");
+        let mut v = good();
+        v["products"][0]["badges"] = json!((0..13).map(|i| format!("B{i}")).collect::<Vec<_>>());
+        assert!(check(v).unwrap_err().contains("at most 12 badges"));
+        let mut v = good();
+        v["products"][0]["badges"] = json!((0..12).map(|i| format!("B{i}")).collect::<Vec<_>>());
+        assert!(check(v).is_ok());
+        let mut v = good();
+        v["products"][0]["badges"] = json!(["x".repeat(41)]);
+        assert!(check(v).unwrap_err().contains("badges is longer than 40"));
+        let mut v = good();
+        v["products"][0]["listing"] = json!("l".repeat(65));
+        assert!(check(v).unwrap_err().contains("listing is longer than 64"));
+        let mut v = good();
+        v["complete_listings"] = json!(["charms", 5]);
+        assert!(check(v).is_err());
+    }
+
+    #[test]
+    fn a_price_above_the_list_price_is_kept_with_a_note() {
+        let mut v = good();
+        v["products"][0]["price"] = json!(812.0);
+        v["products"][0]["list_price"] = json!(399.0);
+        let c = check(v).unwrap();
+        assert_eq!(c.products[0].price, Some(812.0));
+        assert!(c.warnings.iter().any(|w| w.contains("812.00 is above its list price 399.00")), "{:?}", c.warnings);
+        assert_eq!(c.products[0].regular(), Some(812.0), "never a negative saving");
+    }
+
+    #[test]
+    fn notes_are_capped() {
+        let mut w = Vec::new();
+        for i in 0..60 {
+            warn(&mut w, format!("note {i}"));
+        }
+        assert_eq!(w.len(), MAX_WARNINGS + 1);
+        assert_eq!(w.last().unwrap(), "10 more notes");
+    }
+
+    #[test]
+    fn an_unknown_store_is_named_without_listing_the_others() {
+        let mut v = good();
+        v["store"] = json!("evil-shop");
+        let err = check(v).unwrap_err();
+        assert!(err.contains("unknown store \"evil-shop\""), "{err}");
+        assert!(!err.contains("pandora-us") && !err.contains("hardjewelry"), "the store tab gets this text back: {err}");
     }
 
     #[test]

@@ -147,7 +147,7 @@ mod tests {
     use super::*;
 
     fn store() -> StoreCfg {
-        StoreCfg { image_hosts: vec!["cdn.shopify.com".into()], ..StoreCfg::ad_hoc_shopify("shop.example") }
+        StoreCfg { image_hosts: vec!["cdn.shopify.com".into()], ..StoreCfg::ad_hoc_shopify("shop.example", "USD") }
     }
 
     // Hand-made, shaped like a real storefront products.json page.

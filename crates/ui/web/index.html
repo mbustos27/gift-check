@@ -168,6 +168,17 @@
       <h2>Browser capture</h2>
       <p>Stores behind a bot check are read in your own browser. Open the bridge, open the store from it, then run the store's capture script in that tab. The bridge receives the listings and stores them here.</p>
       <div class="actions"><a class="button primary" href="/bridge" target="_blank">Open the bridge</a></div>
+      <p class="hint">In Claude's built-in browser the bridge can't work: it opens the store in the same tab, replacing the bridge. There, save the capture as a file in the store tab (<code>gcPandora.download()</code>) and import it below.</p>
+    </div>
+    <div class="card">
+      <h2>Import a capture file</h2>
+      <p>A capture saved as a file goes in here and is checked exactly like <code>gift-check import</code>. A capture older than 30 days needs the command line (<code>gift-check import FILE --force</code>).</p>
+      <form id="imp-form" class="actions">
+        <label for="imp-file">Capture file (.json, up to 50 MB)</label>
+        <input type="file" id="imp-file" accept=".json,application/json">
+        <button type="submit" class="primary">Import</button>
+      </form>
+      <div id="imp-result" class="fetchlog" aria-live="polite" hidden></div>
     </div>
     <div class="card">
       <h2>Captures and fetches</h2>

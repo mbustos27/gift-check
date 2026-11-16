@@ -3,7 +3,7 @@
 use gift_check_core::capture;
 use gift_check_core::db::{Db, Query, Sort};
 use gift_check_core::model::{Product, Recipient};
-use gift_check_core::stores::{valid_host, SourceKind, StoreCfg};
+use gift_check_core::stores::{valid_currency, valid_host, SourceKind, StoreCfg};
 use gift_check_core::{plan, time, Config};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -13,8 +13,11 @@ const HELP: &str = "gift-check - shop for gifts across store catalogs, on this c
 USAGE: gift-check [--data-dir DIR] <command> ...
 
   stores                                   the configured stores and what is stored for each
-  fetch shopify <domain> [--collection H]  read a Shopify store's public catalog (politely)
-  import <capture.json>                    store a capture made in the browser (docs/CAPTURE.md)
+  fetch shopify <domain> [--collection H] [--currency C]
+                                           read a Shopify store's public catalog (politely);
+                                           a store not in stores.toml needs --currency (USD, EUR, ...)
+  import <capture.json> [--force]          store a capture made in the browser (docs/CAPTURE.md);
+                                           --force takes one older than 30 days
   search <words...> [--store S] [--kind K] [--max N] [--on-sale] [--json]
   product <store> <id>                     details and price history
   recipient add <nick> [options]           someone to shop for (a nickname is enough)
@@ -158,9 +161,9 @@ fn stores(db: &Db, cfg: &Config, dir: &Path) -> Result<i32, String> {
 }
 
 fn fetch(db: &Db, cfg: &Config, rest: &[String]) -> Result<i32, String> {
-    let a = Args::parse(rest, &["collection"], &[])?;
+    let a = Args::parse(rest, &["collection", "currency"], &[])?;
     if a.pos.first().map(String::as_str) != Some("shopify") || a.pos.len() != 2 {
-        return Err("usage: gift-check fetch shopify <domain> [--collection <handle>]".into());
+        return Err("usage: gift-check fetch shopify <domain> [--collection <handle>] [--currency <code>]".into());
     }
     let host = a.pos[1].trim().trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_ascii_lowercase();
     if !valid_host(&host) {
@@ -170,14 +173,26 @@ fn fetch(db: &Db, cfg: &Config, rest: &[String]) -> Result<i32, String> {
         Some(s) if s.source == SourceKind::BrowserCapture => {
             return Err(format!("{} blocks plain requests, so it is captured in the browser: run `gift-check ui` and use the bridge", s.name));
         }
-        Some(s) => s.clone(),
+        Some(s) => {
+            if a.val("currency").is_some_and(|c| c != s.currency) {
+                return Err(format!("{} is in stores.toml with prices in {}; --currency can't change that", s.name, s.currency));
+            }
+            s.clone()
+        }
         None => {
-            println!("{host} isn't in stores.toml; fetching it as a one-off store (its images won't show in the window).");
-            StoreCfg::ad_hoc_shopify(&host)
+            // Prices from different currencies must never be added up, so a one-off store says its own.
+            let currency = a.val("currency").map(|c| c.trim().to_ascii_uppercase()).ok_or(format!(
+                "{host} isn't in stores.toml, so gift-check doesn't know its currency: add --currency USD (or EUR, GBP, ...), or add the store to stores.toml"
+            ))?;
+            if !valid_currency(&currency) {
+                return Err(format!("--currency {currency:?} must be a three-letter code like USD"));
+            }
+            println!("{host} isn't in stores.toml; fetching it as a one-off store in {currency} (its images won't show in the window).");
+            StoreCfg::ad_hoc_shopify(&host, &currency)
         }
     };
     let http = gift_check_fetch::Http::new();
-    let clock = gift_check_fetch::SystemClock::default();
+    let clock = gift_check_fetch::SystemClock;
     let base = store.origin.clone();
     let rep = gift_check_fetch::run_shopify(db, &cfg.rules, &store, &base, a.val("collection"), &http, &clock, &mut |line| println!("  {line}"))?;
     for l in &rep.log {
@@ -202,14 +217,17 @@ fn fetch(db: &Db, cfg: &Config, rest: &[String]) -> Result<i32, String> {
 }
 
 fn import(db: &Db, cfg: &Config, rest: &[String]) -> Result<i32, String> {
-    let a = Args::parse(rest, &[], &[])?;
-    let [file] = a.pos.as_slice() else { return Err("usage: gift-check import <capture.json>".into()) };
+    let a = Args::parse(rest, &[], &["force"])?;
+    let [file] = a.pos.as_slice() else { return Err("usage: gift-check import <capture.json> [--force]".into()) };
     let size = std::fs::metadata(file).map_err(|e| format!("can't read {file}: {e}"))?.len();
     if size > capture::MAX_FILE_BYTES {
         return Err(format!("{file} is {} MB; the limit is 50 MB", size / (1024 * 1024)));
     }
     let text = std::fs::read_to_string(file).map_err(|e| format!("can't read {file}: {e}"))?;
-    let c = capture::validate_text(&text, &cfg.stores).map_err(|e| format!("{file}: {e}"))?;
+    let c = capture::validate_file(&text, &cfg.stores, a.flags.contains("force")).map_err(|e| {
+        let known: Vec<&str> = cfg.stores.stores.iter().map(|s| s.id.as_str()).collect();
+        if e.starts_with("unknown store") { format!("{file}: {e}; known stores: {}", known.join(", ")) } else { format!("{file}: {e}") }
+    })?;
     let s = capture::store(db, cfg, &c, "import")?;
     println!(
         "Imported {} products for {} (capture #{}){}{}.",

@@ -300,8 +300,30 @@ id = "pandora-moments"
 label = "Pandora Moments"
 store = "pandora-us"
 kinds = ["bracelet", "charm", "clip", "spacer", "safety-chain"]
+name_words = ["Moments", "Snake Chain"]
+collection_words = ["Moments"]
+note = "Named Moments (or a snake chain, the Moments base). Pandora names its Moments bracelets \"Pandora Moments ...\"."
+source = "guide §1 table and https://sg.pandora.net/en/inspiration/bracelet-guide/Moments-Bracelets/ [official, via search snippet]"
+as_of = "2026-11-15"
+
+[[system]]
+id = "pandora-moments"
+label = "Pandora Moments"
+store = "pandora-us"
+kinds = ["bracelet"]
+name_words = ["Bangle", "T-Bar", "Slider"]
+context_words = ["Charm", "Moments"]
+note = "A bangle, T-bar or slider bracelet is a Moments base only when its name (or collection) also says Charm or Moments: Pandora also sells plain pave bangles and slider tennis bracelets that take no charms."
+source = "guide §1 table (Moments: snake chain, T-bar, studded chain, bangles, slider) [official, via search snippet]; the context condition is a word pattern"
+as_of = "2026-11-15"
+
+[[system]]
+id = "pandora-moments"
+label = "Pandora Moments"
+store = "pandora-us"
+kinds = ["charm", "clip", "spacer", "safety-chain"]
 fallback = true
-note = "Inference: a Pandora bracelet, charm, clip, spacer or safety chain not named ME, Reflexions or Essence is taken as Moments (Moments is the main system: snake chain, T-bar, studded chain, bangles, slider, leather)."
+note = "Inference: a Pandora charm, clip, spacer or safety chain not named ME, Reflexions or Essence is taken as Moments, and marked inferred (check the product page). Never applied to bracelets: tennis, Cuban, pave, chain and cord bracelets take no charms, so a bracelet needs its system named."
 source = "guide §1 table and https://sg.pandora.net/en/inspiration/bracelet-guide/Moments-Bracelets/ [official, via search snippet]; the fallback itself is an inference"
 as_of = "2026-11-15"
 

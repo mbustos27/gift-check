@@ -24,12 +24,18 @@ pub struct Product {
     pub name: String,
     pub url: String,
     pub category: Option<String>,
+    /// The listing page the product was read from (a browser capture); scopes `complete_listings`.
+    #[serde(default)]
+    pub listing: Option<String>,
     pub kind: Option<String>,
     /// The kind came from the store's data, not from a rule.
     #[serde(default)]
     pub kind_given: bool,
     /// The compatibility system (from the rules), such as "pandora-moments".
     pub system: Option<String>,
+    /// The system came from a fallback rule (nothing on the listing named it), so fit is a guess.
+    #[serde(default)]
+    pub system_inferred: bool,
     pub metal: Option<String>,
     pub metal_group: Option<String>,
     #[serde(default)]
@@ -69,9 +75,13 @@ impl Product {
         self.price.or(self.list_price)
     }
 
-    /// The regular price: the list price, or the current price when no list price is known.
+    /// The regular price: the higher of the list price and the current price (a list price below
+    /// the price shown is a misread, never a negative saving), or whichever is known.
     pub fn regular(&self) -> Option<f64> {
-        self.list_price.or(self.price)
+        match (self.list_price, self.current()) {
+            (Some(l), Some(c)) => Some(l.max(c)),
+            (l, c) => l.or(c),
+        }
     }
 
     /// Percent below the list price, when there is a discount.
@@ -182,13 +192,18 @@ impl Recipient {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanItem {
     pub store: String,
     pub id: String,
     #[serde(default = "one")]
     pub qty: u32,
+    /// The price when the plan was saved, and when that price was observed (filled on save).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_price_at: Option<String>,
 }
 
 fn one() -> u32 {

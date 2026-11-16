@@ -8,7 +8,7 @@
 //! lets images come from the configured store image hosts. Store text is only ever shown with
 //! `textContent`.
 
-use gift_check_core::capture::{self, Chunk, MAX_CHUNK_BYTES, MAX_CHUNK_PRODUCTS};
+use gift_check_core::capture::{self, Chunk, MAX_CHUNK_BYTES, MAX_CHUNK_PRODUCTS, MAX_FILE_BYTES};
 use gift_check_core::db::{Db, Query, Scope, Sort};
 use gift_check_core::model::{GiftPlan, PlanItem, Product, Recipient, KINDS};
 use gift_check_core::stores::SourceKind;
@@ -104,9 +104,9 @@ struct Pending {
     origin: String,
     captured_at: String,
     complete: bool,
+    complete_listings: Vec<String>,
     chunks: u32,
     received: BTreeSet<u32>,
-    categories: Vec<Option<String>>,
     sources: Vec<String>,
     merged: usize,
     warnings: Vec<String>,
@@ -129,6 +129,8 @@ pub struct App {
     pending: RefCell<Vec<Pending>>,
     /// Bridge capture ids already stored, so a resent chunk isn't stored twice.
     done: RefCell<Vec<String>>,
+    /// Bridge capture ids closed as incomplete to make room; their late chunks are refused.
+    evicted: RefCell<Vec<String>>,
     fetch: Arc<Mutex<FetchState>>,
     allow_fetch: bool,
     /// Ids for single-message captures that carry no capture_id.
@@ -155,6 +157,8 @@ fn err_json(status: u16, msg: impl Into<String>) -> Reply {
 pub fn body_limit(path: &str) -> usize {
     if path == "/api/capture" {
         MAX_CHUNK_BYTES
+    } else if path == "/api/import" {
+        MAX_FILE_BYTES as usize
     } else {
         1_000_000
     }
@@ -171,6 +175,8 @@ impl App {
 
     pub fn with(db: Db, cfg: Config, data_dir: &Path, port: u16, allow_fetch: bool) -> Result<App, String> {
         db.sync_rules(&cfg.rules, &cfg.rules_hash)?;
+        // Chunks still owed to a bridge capture from before a restart will never come.
+        db.close_open_captures("bridge", "incomplete: gift-check was restarted before all chunks arrived")?;
         for s in &cfg.stores.stores {
             db.upsert_store(s)?;
         }
@@ -181,6 +187,7 @@ impl App {
             cfg,
             pending: RefCell::new(Vec::new()),
             done: RefCell::new(Vec::new()),
+            evicted: RefCell::new(Vec::new()),
             fetch: Arc::new(Mutex::new(FetchState::default())),
             allow_fetch,
             counter: Cell::new(0),
@@ -265,7 +272,7 @@ impl App {
             ("GET", "/api/state") => self.state(),
             ("GET", "/api/search") => self.search(query),
             ("GET", "/api/product") => self.product(query),
-            ("GET", "/api/compare") => self.db.compare(&param(query, "by").unwrap_or_else(|| "store".into())),
+            ("GET", "/api/compare") => self.db.compare(&param(query, "by").unwrap_or_else(|| "store".into()), param(query, "currency").filter(|c| !c.is_empty()).as_deref()),
             ("GET", "/api/plans") => self.plans(),
             ("GET", "/api/fetch") => Ok(json!(self.fetch.lock().map(|s| s.clone()).unwrap_or_default())),
             ("POST", "/api/recipient") => self.save_recipient(body),
@@ -274,6 +281,7 @@ impl App {
             ("POST", "/api/plan/delete") => self.delete_plan(body),
             ("POST", "/api/plan/suggest") => self.suggest(body),
             ("POST", "/api/capture") => self.capture(body),
+            ("POST", "/api/import") => self.import(body),
             ("POST", "/api/fetch") => self.start_fetch(body),
             ("GET", _) | ("POST", _) => return err_json(404, "not found"),
             _ => return err_json(405, "method not allowed"),
@@ -465,8 +473,11 @@ impl App {
             let r = self.recipient(p.recipient.as_deref()).ok().flatten();
             let (items, missing) = self.db.plan_products(&p.items)?;
             let ev = plan::evaluate(&items, r.as_ref(), p.budget, &self.cfg.rules);
+            let stale = ev.oldest_price_at.as_deref().and_then(time::parse_rfc3339).is_some_and(|t| time::now() - t > plan::STALE_PRICE_DAYS * 86_400);
+            let saved_total = p.items.iter().map(|it| it.saved_price.map(|x| x * f64::from(it.qty.max(1)))).sum::<Option<f64>>().map(|t| (t * 100.0).round() / 100.0);
             out.push(json!({
                 "plan": p, "total": ev.total, "list_total": ev.list_total, "savings": ev.savings, "left": ev.left,
+                "currency": ev.currency, "oldest_price_at": ev.oldest_price_at, "stale": stale, "saved_total": saved_total,
                 "stops": ev.warnings.iter().filter(|w| w.level == "stop").count(),
                 "warns": ev.warnings.iter().filter(|w| w.level == "warn").count(),
                 "missing": missing,
@@ -504,6 +515,12 @@ impl App {
             self.counter.set(self.counter.get() + 1);
             Chunk { capture_id: format!("single-{}-{}", time::now(), self.counter.get()), chunk: 1, chunks: 1 }
         });
+        if self.evicted.borrow().contains(&chunk.capture_id) {
+            return Err(format!(
+                "capture {} was closed as incomplete (too many captures were half-sent at once); this chunk wasn't stored. Send the capture again (a new run of send())",
+                chunk.capture_id
+            ));
+        }
         if self.done.borrow().contains(&chunk.capture_id) {
             return Ok(json!({ "duplicate": true, "done": true, "capture_id": chunk.capture_id, "chunk": chunk.chunk, "chunks": chunk.chunks }));
         }
@@ -511,8 +528,8 @@ impl App {
         let idx = match pending.iter().position(|p| p.capture_id == chunk.capture_id) {
             Some(i) => {
                 let p = &pending[i];
-                if p.store != c.store || p.origin != c.origin || p.captured_at != c.captured_at || p.complete != c.complete || p.chunks != chunk.chunks {
-                    return Err(format!("chunk {} of capture {} doesn't match its first chunk (store, origin, captured_at, complete and chunks must be the same)", chunk.chunk, chunk.capture_id));
+                if p.store != c.store || p.origin != c.origin || p.captured_at != c.captured_at || p.complete != c.complete || p.complete_listings != c.complete_listings || p.chunks != chunk.chunks {
+                    return Err(format!("chunk {} of capture {} doesn't match its first chunk (store, origin, captured_at, complete, complete_listings and chunks must be the same)", chunk.chunk, chunk.capture_id));
                 }
                 i
             }
@@ -521,6 +538,11 @@ impl App {
                     let old = pending.remove(0);
                     let note = format!("incomplete: only {} of {} chunks arrived", old.received.len(), old.chunks);
                     self.db.finish_capture(old.db_id, false, &Scope::None, Some(&note))?;
+                    let mut evicted = self.evicted.borrow_mut();
+                    evicted.push(old.capture_id);
+                    if evicted.len() > 100 {
+                        evicted.remove(0);
+                    }
                 }
                 let store = self.cfg.stores.get(&c.store).ok_or("unknown store")?;
                 self.db.upsert_store(store)?;
@@ -532,9 +554,9 @@ impl App {
                     origin: c.origin.clone(),
                     captured_at: c.captured_at.clone(),
                     complete: c.complete,
+                    complete_listings: c.complete_listings.clone(),
                     chunks: chunk.chunks,
                     received: BTreeSet::new(),
-                    categories: vec![],
                     sources: vec![],
                     merged: 0,
                     warnings: vec![],
@@ -548,33 +570,40 @@ impl App {
         }
         self.db.store_products(p.db_id, &c.captured_at, &c.products, &self.cfg.rules)?;
         p.received.insert(chunk.chunk);
-        for cat in capture::categories(&c.products) {
-            if !p.categories.contains(&cat) {
-                p.categories.push(cat);
-            }
-        }
         for s in c.sources {
             if !p.sources.contains(&s) && p.sources.len() < 1000 {
                 p.sources.push(s);
             }
         }
         p.merged += c.merged;
-        p.warnings.extend(c.warnings.into_iter().take(20));
+        let room = 50usize.saturating_sub(p.warnings.len());
+        p.warnings.extend(c.warnings.into_iter().take(room));
         let stored = self.db.capture_count(p.db_id)?;
         if p.received.len() as u32 == p.chunks {
             let p = pending.remove(idx);
             self.db.set_capture_sources(p.db_id, &p.sources)?;
-            let scope = if p.complete { Scope::Categories(p.categories.clone()) } else { Scope::None };
-            let note = (!p.warnings.is_empty()).then(|| p.warnings.join("; "));
-            let (count, gone) = self.db.finish_capture(p.db_id, p.complete, &scope, note.as_deref())?;
+            let mut notes = p.warnings.clone();
+            let scope = capture::scope(p.complete, &p.complete_listings, &mut notes);
+            let note = (!notes.is_empty()).then(|| notes.join("; "));
+            let fin = self.db.finish_capture(p.db_id, p.complete, &scope, note.as_deref())?;
+            notes.extend(fin.held);
+            let (count, gone) = (fin.products, fin.discontinued);
             let mut done = self.done.borrow_mut();
             done.push(p.capture_id.clone());
             if done.len() > 100 {
                 done.remove(0);
             }
-            return Ok(json!({ "done": true, "capture": p.db_id, "capture_id": p.capture_id, "chunk": chunk.chunk, "chunks": p.chunks, "received": p.chunks, "stored": count, "discontinued": gone, "complete": p.complete, "merged": p.merged, "warnings": p.warnings }));
+            return Ok(json!({ "done": true, "capture": p.db_id, "capture_id": p.capture_id, "chunk": chunk.chunk, "chunks": p.chunks, "received": p.chunks, "stored": count, "discontinued": gone, "complete": p.complete, "merged": p.merged, "warnings": notes }));
         }
         Ok(json!({ "done": false, "capture": p.db_id, "capture_id": p.capture_id, "chunk": chunk.chunk, "chunks": p.chunks, "received": p.received.len(), "stored": stored }))
+    }
+
+    /// A capture file chosen in the window: the same checks and storing as `gift-check import`
+    /// (an old capture needs the command line's --force).
+    fn import(&self, body: &str) -> Result<Value, String> {
+        let c = capture::validate_file(body, &self.cfg.stores, false)?;
+        let s = capture::store(&self.db, &self.cfg, &c, "import")?;
+        Ok(json!({ "imported": s, "captured_at": c.captured_at }))
     }
 
     /// Starts a Shopify fetch of a configured store in the background.
@@ -608,7 +637,7 @@ impl App {
             };
             let res = Db::open(&gift_check_core::db_path(&dir)).and_then(|db| {
                 let http = gift_check_fetch::Http::new();
-                let clock = gift_check_fetch::SystemClock::default();
+                let clock = gift_check_fetch::SystemClock;
                 gift_check_fetch::run_shopify(&db, &rules, &store, &store.origin, None, &http, &clock, &mut log)
             });
             if let Ok(mut s) = state.lock() {

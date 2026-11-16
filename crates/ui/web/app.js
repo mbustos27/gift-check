@@ -291,7 +291,8 @@ function renderPlan() {
   }
   EVAL.lines.forEach((l, i) => lines.append(el("li", {},
     el("div", {}, el("div", { class: isBase(l.kind) ? "base" : "" }, webLink(l.url, l.name)),
-      el("div", { class: "meta" }, [l.kind, l.system_label, l.metal_group].filter(Boolean).join(" · "))),
+      el("div", { class: "meta" }, [l.kind, l.system_label ? `${l.system_label}${l.system_inferred ? " (inferred)" : ""}` : null, l.metal_group].filter(Boolean).join(" · ")),
+      el("div", { class: "meta" }, `price ${l.price_at ? `seen ${l.price_at.slice(0, 10)}` : "date unknown"} · for ${l.priced}`)),
     priceBlock(l),
     el("button", { type: "button", class: "x", "aria-label": `Remove ${l.name}`, onclick: () => removeItem(i) }, "✕"))));
   for (const m of EVAL.missing || []) lines.append(el("li", { class: "hint" }, `${m} is no longer in the catalog.`));
@@ -333,10 +334,12 @@ async function loadPlans() {
     if (!d.plans.length) list.append(el("li", { class: "hint" }, "No saved plans yet."));
     for (const x of d.plans) {
       const p = x.plan;
-      const flags = [x.stops ? `${x.stops} problem${x.stops === 1 ? "" : "s"}` : null, x.warns ? `${x.warns} to check` : null, x.missing.length ? `${x.missing.length} gone` : null].filter(Boolean).join(", ");
+      const flags = [x.stops ? `${x.stops} problem${x.stops === 1 ? "" : "s"}` : null, x.warns ? `${x.warns} to check` : null, x.missing.length ? `${x.missing.length} gone` : null, x.stale ? "prices older than 7 days: capture again before buying" : null].filter(Boolean).join(", ");
+      const dated = x.oldest_price_at ? ` · prices from ${x.oldest_price_at.slice(0, 10)}` : "";
+      const saved = x.saved_total != null && Math.abs(x.saved_total - x.total) >= 0.005 ? ` · ${money(x.saved_total)} when saved` : "";
       list.append(el("li", {},
         el("div", {}, el("strong", {}, p.name), p.recipient ? ` for ${p.recipient}` : "",
-          el("div", { class: "meta" }, `${p.items.length} item${p.items.length === 1 ? "" : "s"} · now ${money(x.total)} (list ${money(x.list_total)})${p.budget != null ? ` · budget ${money(p.budget)}` : ""}${flags ? ` · ${flags}` : ""}`)),
+          el("div", { class: "meta" }, `${p.items.length} item${p.items.length === 1 ? "" : "s"} · now ${money(x.total)} (list ${money(x.list_total)})${saved}${dated}${p.budget != null ? ` · budget ${money(p.budget)}` : ""}${flags ? ` · ${flags}` : ""}`)),
         el("div", { class: "btns" },
           el("button", { type: "button", class: "secondary small", onclick: () => loadPlan(p) }, "Open"),
           el("button", { type: "button", class: "secondary small", onclick: () => deletePlan(p) }, "Delete"))));
@@ -544,6 +547,35 @@ function renderCaptures() {
   $("#paths").textContent = `Data: ${STATE.data_dir} · stores from ${STATE.stores_from} · rules from ${STATE.rules_from} (${STATE.rules.count} rules${STATE.rules.todo ? `, ${STATE.rules.todo} not yet sourced` : ""})`;
 }
 
+/* ---------- Import a capture file ---------- */
+const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
+
+async function importFile(e) {
+  e.preventDefault();
+  const out = $("#imp-result");
+  const f = $("#imp-file").files[0];
+  out.hidden = false;
+  if (!f) { out.textContent = "Choose a capture file first."; return; }
+  if (f.size > MAX_IMPORT_BYTES) { out.textContent = `${f.name} is ${(f.size / 1048576).toFixed(1)} MB; the limit is 50 MB.`; return; }
+  out.textContent = `Importing ${f.name}…`;
+  try {
+    // The file's own text goes to the server unchanged, so it is checked exactly like `gift-check import`.
+    const r = await fetch("/api/import", { method: "POST", headers: { "X-Gift-Check": "1", "Content-Type": "application/json" }, body: await f.text() });
+    let d;
+    try { d = await r.json(); } catch { throw new Error(`The gift-check server replied ${r.status}.`); }
+    if (!r.ok) throw new Error(d.error || `Error ${r.status}`);
+    const s = d.imported;
+    out.replaceChildren(
+      el("p", { class: "ok-line" }, `${f.name}: ${s.products} products stored for ${storeName(s.store)} (capture #${s.capture_id}, read ${String(d.captured_at).slice(0, 10)}), ${s.discontinued} marked gone${s.merged ? `, ${s.merged} duplicates merged` : ""}.`),
+      s.warnings.length ? el("ul", { class: "small-text" }, s.warnings.map((w) => el("li", {}, w))) : null);
+    $("#imp-file").value = "";
+    await loadState();
+    search();
+  } catch (err) {
+    out.replaceChildren(el("p", { class: "bad" }, `${f.name} was refused: ${err.message}`));
+  }
+}
+
 /* ---------- Start ---------- */
 document.addEventListener("DOMContentLoaded", async () => {
   setupTabs();
@@ -575,6 +607,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#c-b").addEventListener("change", renderCompare);
   $("#r-form").addEventListener("submit", saveRecipient);
   $("#r-new").addEventListener("click", () => editRecipient(null));
+  $("#imp-form").addEventListener("submit", importFile);
   $("#d-close").addEventListener("click", () => $("#detail").close());
   $("#detail").addEventListener("click", (e) => { if (e.target === $("#detail")) $("#detail").close(); });
   renderPlan();

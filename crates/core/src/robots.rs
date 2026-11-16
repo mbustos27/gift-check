@@ -39,6 +39,8 @@ impl Robots {
     }
 
     pub fn parse(text: &str, token: &str) -> Robots {
+        // A UTF-8 byte order mark before the first line is not part of it.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut cut = text.len().min(PARSE_LIMIT);
         while !text.is_char_boundary(cut) {
             cut -= 1;
@@ -47,7 +49,8 @@ impl Robots {
         let mut cur: Option<Group> = None;
         // True while the current group has only seen user-agent lines so far.
         let mut collecting_agents = false;
-        for raw in text[..cut].lines() {
+        // RFC 9309 lines end in CR LF, LF or a lone CR.
+        for raw in text[..cut].split(['\r', '\n']) {
             let line = raw.split('#').next().unwrap_or("").trim();
             let Some((key, value)) = line.split_once(':') else { continue };
             let key = key.trim().to_ascii_lowercase();
@@ -258,6 +261,21 @@ mod tests {
         assert!(!longer.allowed("/folder/private/x"));
         // An empty disallow means nothing is disallowed.
         assert!(Robots::parse("User-agent: *\nDisallow:\n", UA).allowed("/x"));
+    }
+
+    #[test]
+    fn a_byte_order_mark_and_any_line_ending_are_understood() {
+        // With the BOM glued to "User-agent" the first line wasn't recognised: no group, allow all.
+        let bom = Robots::parse("\u{feff}User-agent: *\nDisallow: /\n", UA);
+        assert_eq!(bom.matched, "*");
+        assert!(!bom.allowed("/products.json?limit=250&page=1"));
+        // Old Mac line endings: one "line" holding everything used to be read as nothing.
+        let cr = Robots::parse("User-agent: *\rDisallow: /products.json\r", UA);
+        assert_eq!(cr.matched, "*");
+        assert!(!cr.allowed("/products.json?limit=250&page=1"));
+        let crlf = Robots::parse("User-agent: *\r\nDisallow: /cart\r\n\r\nUser-agent: gift-check\r\nDisallow: /x\r\n", UA);
+        assert_eq!(crlf.matched, "gift-check");
+        assert!(!crlf.allowed("/x") && crlf.allowed("/cart"));
     }
 
     #[test]

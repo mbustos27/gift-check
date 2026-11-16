@@ -18,6 +18,12 @@ fn post(a: &App, path: &str, body: &str) -> Reply {
     a.route("POST", path, HOST, Some("1"), JSON, OURS, body)
 }
 
+/// One fixed capture time per test run, an hour ago (captures older than 30 days are refused).
+fn at() -> String {
+    static AT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    AT.get_or_init(|| time::hours_ago_utc(1)).clone()
+}
+
 fn body(r: &Reply) -> Value {
     serde_json::from_str(&r.body).unwrap_or_else(|e| panic!("{e}: {}", r.body))
 }
@@ -25,7 +31,7 @@ fn body(r: &Reply) -> Value {
 fn chunk(id: &str, n: u32, of: u32, complete: bool, products: Value) -> String {
     json!({
         "type": "gift-check-capture", "schema": 1, "capture_id": id, "chunk": n, "chunks": of,
-        "store": "pandora-us", "origin": "https://us.pandora.net", "captured_at": "2026-11-15T16:00:00Z",
+        "store": "pandora-us", "origin": "https://us.pandora.net", "captured_at": at(),
         "complete": complete, "sources": [format!("https://us.pandora.net/en/charms/?page={n}")], "products": products,
     })
     .to_string()
@@ -87,8 +93,9 @@ fn pages_never_build_markup_from_data() {
     for (name, page) in [("index.html", INDEX), ("bridge.html", BRIDGE)] {
         assert!(!page.contains("<script>") && !page.contains("onclick") && !page.contains("http://") && !page.contains("https://"), "{name} must load only its own scripts");
     }
-    // The bridge checks who sent a message before using it.
-    assert!(BRIDGE_JS.contains("e.source") && BRIDGE_JS.contains("e.origin"));
+    // The message listener uses the filter tests/js/bridge.test.js exercises (window, origin,
+    // store, NaN), and the page wiring stays out of node.
+    assert!(BRIDGE_JS.contains("const verdict = classify(opened, e);"));
     assert!(!BRIDGE_JS.contains("noopener"), "the bridge must keep the opener so the store tab can post back");
 }
 
@@ -230,4 +237,127 @@ fn query_decoding() {
     assert_eq!(param("q=50%25%20off", "q").as_deref(), Some("50% off"));
     assert_eq!(param("q=%zz", "q").as_deref(), Some("%zz"));
     assert_eq!(param("a=1", "q"), None);
+}
+
+/// A chunk whose products carry a listing, with the capture's complete listings.
+fn listed_chunk(id: &str, n: u32, of: u32, listings: &[&str], ids: &[&str]) -> String {
+    let products: Vec<Value> = ids
+        .iter()
+        .map(|pid| {
+            let mut p = product(pid, &format!("Charm {pid}"), 10.0, 10.0);
+            p["listing"] = json!("charms");
+            p
+        })
+        .collect();
+    let mut v: Value = serde_json::from_str(&chunk(id, n, of, !listings.is_empty(), json!(products))).unwrap();
+    v["complete_listings"] = json!(listings);
+    v.to_string()
+}
+
+#[test]
+fn a_chunked_complete_capture_marks_nothing_gone_before_its_last_chunk() {
+    let a = app();
+    let six = ["700001", "700002", "700003", "700004", "700005", "700006"];
+    assert_eq!(post(&a, "/api/capture", &listed_chunk("seed-00001", 1, 1, &[], &six)).status, 200);
+    // A complete capture of the charms listing in two chunks; 700006 is in neither.
+    let r = post(&a, "/api/capture", &listed_chunk("full-00001", 1, 2, &["charms"], &["700001", "700002"]));
+    assert_eq!(body(&r)["done"], false, "{}", r.body);
+    for id in six {
+        assert!(!a.db.product("pandora-us", id).unwrap().unwrap().discontinued, "{id} marked gone before the last chunk");
+    }
+    let v = body(&post(&a, "/api/capture", &listed_chunk("full-00001", 2, 2, &["charms"], &["700003", "700004", "700005"])));
+    assert_eq!((v["done"].as_bool(), v["discontinued"].as_i64()), (Some(true), Some(1)), "{v}");
+    assert!(a.db.product("pandora-us", "700006").unwrap().unwrap().discontinued);
+    assert!(!a.db.product("pandora-us", "700001").unwrap().unwrap().discontinued, "seen in chunk 1");
+    // A chunk whose complete_listings differ from the first chunk's is refused.
+    post(&a, "/api/capture", &listed_chunk("full-00002", 1, 2, &["charms"], &["700001"]));
+    let r = post(&a, "/api/capture", &listed_chunk("full-00002", 2, 2, &["charms", "rings"], &["700002"]));
+    assert_eq!(r.status, 400);
+    assert!(body(&r)["error"].as_str().unwrap().contains("complete_listings"));
+}
+
+#[test]
+fn a_fifth_half_sent_capture_closes_the_oldest_and_its_late_chunks_are_refused() {
+    let a = app();
+    assert_eq!(body(&post(&a, "/api/capture", &listed_chunk("capA-0001", 1, 2, &[], &["700001"])))["done"], false);
+    for i in 0..4 {
+        post(&a, "/api/capture", &listed_chunk(&format!("fill-000{i}"), 1, 2, &[], &[&format!("70010{i}")]));
+    }
+    let open = a.db.captures(10).unwrap();
+    let first = open.iter().find(|c| c.external_id.as_deref() == Some("capA-0001")).unwrap();
+    assert!(first.finished_at.is_some() && !first.complete, "the oldest was closed as incomplete");
+    assert!(first.note.as_deref().unwrap().contains("only 1 of 2 chunks"));
+    let before = a.db.captures(100).unwrap().len();
+    let r = post(&a, "/api/capture", &listed_chunk("capA-0001", 2, 2, &[], &["700002"]));
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(body(&r)["error"].as_str().unwrap().contains("was closed as incomplete"));
+    assert_eq!(a.db.captures(100).unwrap().len(), before, "no new capture was opened for the late chunk");
+    assert!(a.db.product("pandora-us", "700002").unwrap().is_none(), "the late chunk wasn't stored");
+}
+
+#[test]
+fn half_sent_captures_are_closed_when_the_window_starts() {
+    let db = Db::memory().unwrap();
+    let open = db.begin_capture("pandora-us", "bridge", Some("left-open"), None, &[]).unwrap();
+    let fetch = db.begin_capture("hardjewelry", "shopify", None, None, &[]).unwrap();
+    let dir = std::env::temp_dir().join(format!("gift-check-ui-tests-{}", std::process::id()));
+    let a = App::with(db, Config::built_in().unwrap(), &dir, 8781, false).unwrap();
+    let caps = a.db.captures(10).unwrap();
+    let row = |id: i64| caps.iter().find(|c| c.id == id).unwrap().clone();
+    assert!(row(open).finished_at.is_some() && row(open).note.as_deref().unwrap().contains("restarted"));
+    assert!(row(fetch).finished_at.is_none(), "a fetch another process is running is left alone");
+}
+
+#[test]
+fn an_unknown_store_is_refused_without_naming_the_others() {
+    let a = app();
+    let mut v: Value = serde_json::from_str(&chunk("abcdefgh09", 1, 1, false, json!([]))).unwrap();
+    v["store"] = json!("nope");
+    let r = post(&a, "/api/capture", &v.to_string());
+    let err = body(&r)["error"].as_str().unwrap().to_string();
+    assert_eq!(r.status, 400);
+    assert!(err.contains("unknown store") && !err.contains("pandora-us") && !err.contains("hardjewelry"), "{err}");
+}
+
+#[test]
+fn a_capture_file_can_be_imported_from_the_window() {
+    let a = app();
+    let file = json!({ "schema": 1, "store": "pandora-us", "origin": "https://us.pandora.net", "captured_at": at(), "complete": false,
+                       "products": [product("794948C01", "Lucky Cat Charm", 68.0, 98.0)] })
+    .to_string();
+    let r = post(&a, "/api/import", &file);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = body(&r);
+    assert_eq!(v["imported"]["products"], 1);
+    assert_eq!(a.db.captures(1).unwrap()[0].source, "import");
+    // Checked like `gift-check import`: bad files are refused with the reason.
+    let old = file.replace(&at(), &time::hours_ago_utc(40 * 24));
+    assert!(body(&post(&a, "/api/import", &old))["error"].as_str().unwrap().contains("more than 30 days ago"));
+    assert!(body(&post(&a, "/api/import", "{\"schema\":1,\"price\":NaN}"))["error"].as_str().unwrap().contains("isn't valid JSON"));
+    let chunked = serde_json::from_str::<Value>(&chunk("abcdefgh10", 1, 2, false, json!([]))).unwrap().to_string();
+    assert!(body(&post(&a, "/api/import", &chunked))["error"].as_str().unwrap().contains("one chunk"));
+    // The same guards as every POST, and room for a whole file.
+    assert_eq!(a.route("POST", "/api/import", HOST, None, JSON, OURS, &file).status, 403);
+    assert_eq!(a.route("POST", "/api/import", HOST, Some("1"), JSON, Some("https://us.pandora.net"), &file).status, 403);
+    assert_eq!(body_limit("/api/import"), 50 * 1024 * 1024);
+}
+
+#[test]
+fn saved_plans_keep_the_price_they_were_saved_at_and_its_date() {
+    let a = app();
+    post(&a, "/api/capture", &chunk("abcdefgh11", 1, 1, false, json!([product("790001", "Lucky Cat Dangle Charm", 50.0, 70.0)])));
+    let items = r#"[{"store":"pandora-us","id":"790001"}]"#;
+    assert_eq!(post(&a, "/api/plan/save", &format!(r#"{{"name":"Xmas","items":{items}}}"#)).status, 200);
+    let saved = &a.db.plans().unwrap()[0].items[0];
+    assert_eq!((saved.saved_price, saved.saved_price_at.as_deref()), (Some(50.0), Some(at().as_str())));
+    // A later capture changes the price: the list shows both, and the price date.
+    let mut cheaper = serde_json::from_str::<Value>(&chunk("abcdefgh12", 1, 1, false, json!([product("790001", "Lucky Cat Dangle Charm", 40.0, 70.0)]))).unwrap();
+    cheaper["captured_at"] = json!(time::now_utc());
+    post(&a, "/api/capture", &cheaper.to_string());
+    let p = &body(&get(&a, "/api/plans"))["plans"][0];
+    assert_eq!((p["total"].as_f64(), p["saved_total"].as_f64(), p["stale"].as_bool()), (Some(40.0), Some(50.0), Some(false)), "{p}");
+    assert_eq!(p["oldest_price_at"].as_str().map(|s| &s[..10]), Some(&time::now_utc()[..10]));
+    let ev = body(&post(&a, "/api/plan/evaluate", &format!(r#"{{"items":{items}}}"#)))["evaluation"].clone();
+    assert_eq!(ev["lines"][0]["priced"], "the price on the listing");
+    assert!(ev["lines"][0]["price_at"].is_string());
 }

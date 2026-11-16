@@ -118,14 +118,15 @@ impl StoreCfg {
         https_host(url).is_some_and(|h| h == self.host() || self.image_hosts.contains(&h))
     }
 
-    /// A store gift-check met only on the command line (`fetch shopify <domain>`).
-    pub fn ad_hoc_shopify(host: &str) -> StoreCfg {
+    /// A store gift-check met only on the command line (`fetch shopify <domain> --currency C`).
+    /// Its currency is always stated: prices in different currencies are never added up.
+    pub fn ad_hoc_shopify(host: &str, currency: &str) -> StoreCfg {
         StoreCfg {
             id: host.to_string(),
             name: host.to_string(),
             origin: format!("https://{host}"),
             source: SourceKind::Shopify,
-            currency: usd(),
+            currency: currency.to_string(),
             image_hosts: vec!["cdn.shopify.com".into()],
             start_urls: vec![],
             note: None,

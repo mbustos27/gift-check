@@ -6,6 +6,9 @@ use crate::rules::{Fit, Rules, SizeAdvice};
 use crate::text::{has_words, has_words_loose};
 use serde::Serialize;
 
+/// A price seen longer ago than this gets a "re-check before buying" warning.
+pub const STALE_PRICE_DAYS: i64 = 7;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Warning {
     /// "stop" (don't buy as is), "warn" (check first) or "note".
@@ -23,12 +26,19 @@ pub struct Line {
     pub kind: Option<String>,
     pub system: Option<String>,
     pub system_label: Option<String>,
+    /// The system is a guess from a fallback rule, not named on the listing.
+    pub system_inferred: bool,
     pub metal_group: Option<String>,
     pub url: String,
     pub image: Option<String>,
     pub qty: u32,
+    pub currency: String,
     pub price: Option<f64>,
     pub list_price: Option<f64>,
+    /// When the price was observed.
+    pub price_at: Option<String>,
+    /// Which variant the price is for ("17 cm", "any size", ...).
+    pub priced: String,
     pub pct_off: Option<f64>,
     pub in_stock: Option<bool>,
     pub discontinued: bool,
@@ -45,6 +55,10 @@ pub struct Evaluation {
     pub unknown_prices: usize,
     pub budget: Option<f64>,
     pub left: Option<f64>,
+    /// The plan's currency (the first item's; a plan mixing currencies gets a "stop").
+    pub currency: Option<String>,
+    /// The oldest price observation in the plan.
+    pub oldest_price_at: Option<String>,
     pub warnings: Vec<Warning>,
     pub size: Option<SizeAdvice>,
     pub notes: Vec<String>,
@@ -58,6 +72,24 @@ fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+/// Which variant a product's price is for. Shopify products carry the cheapest buyable variant's
+/// price; browser captures usually have no variants (the listing shows one price).
+pub fn priced_variant(p: &Product) -> String {
+    let Some(cur) = p.current() else { return "no price known".into() };
+    let priced: Vec<_> = p.variants.iter().filter(|v| v.price.is_some()).collect();
+    if priced.is_empty() {
+        return "the price on the listing".into();
+    }
+    let label = |v: &crate::model::Variant| v.title.clone().or_else(|| v.sku.clone()).unwrap_or_else(|| format!("variant {}", v.id));
+    if priced.iter().all(|v| v.price.is_some_and(|x| (x - cur).abs() < 0.005)) {
+        return if priced.len() == 1 { label(priced[0]) } else { format!("any of its {} variants (same price)", priced.len()) };
+    }
+    match priced.iter().find(|v| v.available != Some(false) && v.price.is_some_and(|x| (x - cur).abs() < 0.005)) {
+        Some(v) => format!("{} (variants differ in price; check the one you pick)", label(v)),
+        None => "the product price (no variant has exactly this price; check the page)".into(),
+    }
+}
+
 fn line(p: &Product, qty: u32, rules: &Rules) -> Line {
     Line {
         store: p.store.clone(),
@@ -66,12 +98,16 @@ fn line(p: &Product, qty: u32, rules: &Rules) -> Line {
         kind: p.kind.clone(),
         system: p.system.clone(),
         system_label: p.system.as_deref().map(|s| rules.system_label(s)),
+        system_inferred: p.system_inferred,
         metal_group: p.metal_group.clone(),
         url: p.url.clone(),
         image: p.image.clone(),
         qty,
+        currency: p.currency.clone(),
         price: p.current(),
         list_price: p.regular(),
+        price_at: p.price_at.clone(),
+        priced: priced_variant(p),
         pct_off: p.pct_off(),
         in_stock: p.in_stock,
         discontinued: p.discontinued,
@@ -86,9 +122,22 @@ fn owned_base_systems<'a>(r: &'a Recipient, rules: &Rules) -> Vec<&'a str> {
 /// Checks a chosen set of items: totals at current and list prices, and every warning the rules
 /// and the recipient's profile give.
 pub fn evaluate(items: &[(Product, u32)], recipient: Option<&Recipient>, budget: Option<f64>, rules: &Rules) -> Evaluation {
+    evaluate_at(items, recipient, budget, rules, crate::time::now())
+}
+
+/// [`evaluate`] as of `now` (Unix seconds), which decides what counts as an old price.
+pub fn evaluate_at(items: &[(Product, u32)], recipient: Option<&Recipient>, budget: Option<f64>, rules: &Rules, now: i64) -> Evaluation {
     let mut w: Vec<Warning> = Vec::new();
     let mut add = |level: &'static str, text: String, p: Option<&Product>| w.push(Warning { level, text, item: p.map(Product::key) });
+    let currency = items.first().map(|(p, _)| p.currency.clone());
+    let mut currencies: Vec<&str> = items.iter().map(|(p, _)| p.currency.as_str()).collect();
+    currencies.sort_unstable();
+    currencies.dedup();
+    if currencies.len() > 1 {
+        add("stop", format!("The plan mixes currencies ({}); the totals mean nothing. Keep one store's currency per plan.", currencies.join(" and ")), None);
+    }
     let (mut total, mut list_total, mut unknown) = (0.0, 0.0, 0);
+    let mut oldest: Option<String> = None;
     for (p, qty) in items {
         match p.current() {
             Some(c) => {
@@ -98,6 +147,14 @@ pub fn evaluate(items: &[(Product, u32)], recipient: Option<&Recipient>, budget:
             None => {
                 unknown += 1;
                 add("warn", format!("{} has no known price; the totals leave it out.", p.name), Some(p));
+            }
+        }
+        if let Some(at) = p.price_at.as_deref() {
+            if oldest.as_deref().is_none_or(|o| at < o) {
+                oldest = Some(at.to_string());
+            }
+            if let Some(t) = crate::time::parse_rfc3339(at).filter(|t| now - t > STALE_PRICE_DAYS * 86_400) {
+                add("warn", format!("{}'s price was seen {} ago ({}); capture the store again before buying.", p.name, crate::time::ago(now - t), &at[..10]), Some(p));
             }
         }
     }
@@ -115,6 +172,12 @@ pub fn evaluate(items: &[(Product, u32)], recipient: Option<&Recipient>, budget:
     let base = bases.first().copied();
     let owned_systems: Vec<&str> = recipient.map(|r| owned_base_systems(r, rules)).unwrap_or_default();
     let nick = recipient.map_or("they", |r| r.nick.as_str());
+    if let Some(b) = base.filter(|b| b.system.is_none()) {
+        if items.iter().any(|(p, _)| rules.is_addon(p.kind.as_deref())) {
+            add("warn", format!("{} isn't recognised as a charm bracelet (nothing names its charm system); charms may not fit it. Check the product page.", b.name), Some(b));
+        }
+    }
+    let inferred = |p: &Product, label: String| format!("{}: fit inferred ({label} is a guess, the listing names no system); check the product page.", p.name);
 
     let mut seen: Vec<String> = Vec::new();
     for (p, _) in items {
@@ -146,6 +209,7 @@ pub fn evaluate(items: &[(Product, u32)], recipient: Option<&Recipient>, budget:
         let label = |s: Option<&str>| s.map_or_else(|| "unknown system".to_string(), |s| rules.system_label(s));
         match base {
             Some(b) => match rules.fit(p.system.as_deref(), b.system.as_deref()) {
+                Fit::Yes { .. } if p.system_inferred => add("warn", inferred(p, label(p.system.as_deref())), Some(p)),
                 Fit::Yes { .. } => {}
                 Fit::No { source, note } => {
                     let why = if note.is_empty() { String::new() } else { format!(" {note}") };
@@ -161,6 +225,8 @@ pub fn evaluate(items: &[(Product, u32)], recipient: Option<&Recipient>, budget:
                     add("stop", format!("{} ({}) doesn't fit the bracelet {nick} has ({}).", p.name, label(p.system.as_deref()), names.join(", ")), Some(p));
                 } else if !any_yes {
                     add("warn", format!("Can't confirm {} ({}) fits the bracelet {nick} has.", p.name, label(p.system.as_deref())), Some(p));
+                } else if p.system_inferred {
+                    add("warn", inferred(p, label(p.system.as_deref())), Some(p));
                 }
             }
             None => add("note", format!("No bracelet in the plan and none recorded for {nick}, so {} can't be checked for fit.", p.name), Some(p)),
@@ -191,6 +257,8 @@ pub fn evaluate(items: &[(Product, u32)], recipient: Option<&Recipient>, budget:
         list_total,
         savings: round2(list_total - total),
         unknown_prices: unknown,
+        currency,
+        oldest_price_at: oldest,
         budget,
         left: budget.map(|b| round2(b - total)),
         warnings: w,
@@ -207,16 +275,22 @@ pub struct Pick {
     pub kind: Option<String>,
     pub system: Option<String>,
     pub metal_group: Option<String>,
+    pub currency: String,
     pub price: f64,
     pub list_price: f64,
     pub url: String,
     pub image: Option<String>,
+    /// Which variant the price is for.
+    pub priced: String,
+    /// The fit rests on a system guessed by a fallback rule.
+    pub fit_inferred: bool,
     pub why: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Suggestion {
     pub title: String,
+    pub currency: String,
     pub base: Option<Pick>,
     pub addons: Vec<Pick>,
     pub total: f64,
@@ -246,10 +320,13 @@ fn pick(p: &Product, why: Vec<String>) -> Pick {
         kind: p.kind.clone(),
         system: p.system.clone(),
         metal_group: p.metal_group.clone(),
+        currency: p.currency.clone(),
         price: p.current().unwrap_or(0.0),
         list_price: p.regular().unwrap_or(0.0),
         url: p.url.clone(),
         image: p.image.clone(),
+        priced: priced_variant(p),
+        fit_inferred: p.system_inferred,
         why: why.join("; "),
     }
 }
@@ -265,7 +342,7 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
     let cheaper = |a: &&Product, b: &&Product| a.current().unwrap_or(f64::MAX).total_cmp(&b.current().unwrap_or(f64::MAX));
 
     // Bases: per system, the best liked one, else the cheapest; matching metal first.
-    let mut bases: Vec<&Product> = pool.iter().copied().filter(|p| rules.is_base(p.kind.as_deref()) && p.system.is_some() && p.current().is_some_and(|c| c <= budget)).collect();
+    let mut bases: Vec<&Product> = pool.iter().copied().filter(|p| rules.is_base(p.kind.as_deref()) && p.system.is_some() && !p.system_inferred && p.current().is_some_and(|c| c <= budget)).collect();
     if bases.iter().any(|p| metal_ok(p, r)) {
         bases.retain(|p| metal_ok(p, r));
     }
@@ -302,6 +379,9 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
             })
             .collect();
         candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| cheaper(&a.0, &b.0)));
+        // One currency per gift: the bracelet's, or (add-ons only) the best candidate's.
+        let Some(currency) = base.map(|b| b.currency.clone()).or_else(|| candidates.first().map(|c| c.0.currency.clone())) else { continue };
+        candidates.retain(|c| c.0.currency == currency);
         let mut per_kind: std::collections::BTreeMap<String, u32> = Default::default();
         let mut fit_sources: Vec<String> = Vec::new();
         for (p, _, likes, source) in candidates {
@@ -329,6 +409,9 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
                 why.push(m.clone());
             }
             why.push(format!("fits {label}"));
+            if p.system_inferred {
+                why.push("fit inferred, check the product page".into());
+            }
             if !fit_sources.contains(&source) {
                 fit_sources.push(source);
             }
@@ -371,7 +454,7 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
         let liked_count = addons.iter().filter(|(p, _)| !liked(p, r).is_empty()).count() + base.map_or(0, |b| usize::from(!liked(b, r).is_empty()));
         out.push((
             liked_count,
-            Suggestion { title, base: base_pick, addons: picks, total: round2(total), list_total: round2(list_total), savings: round2(list_total - total), left: round2(budget - total), notes },
+            Suggestion { title, currency, base: base_pick, addons: picks, total: round2(total), list_total: round2(list_total), savings: round2(list_total - total), left: round2(budget - total), notes },
         ));
     }
     // More liked picks first, then the one that uses the budget best.
@@ -499,5 +582,99 @@ mod tests {
         let ok = evaluate(&[(get("590702"), 1), (get("790001"), 1)], Some(&mom()), Some(150.0), &r);
         assert!(ok.warnings.iter().all(|w| w.level != "stop"), "{:?}", ok.warnings);
         assert_eq!(ok.left, Some(30.0));
+    }
+
+    /// The shipped data/rules.toml, on realistic Pandora names.
+    fn shipped(id: &str, name: &str, price: f64, badges: &[&str]) -> Product {
+        let rules = crate::Config::built_in().unwrap().rules;
+        let mut p = Product {
+            store: "pandora-us".into(),
+            id: id.into(),
+            name: name.into(),
+            url: format!("https://us.pandora.net/en/{id}.html"),
+            currency: "USD".into(),
+            price: Some(price),
+            list_price: Some(price),
+            in_stock: Some(true),
+            badges: (!badges.is_empty()).then(|| badges.iter().map(|b| b.to_string()).collect()),
+            ..Default::default()
+        };
+        rules.classify(&mut p);
+        p
+    }
+
+    #[test]
+    fn suggestions_with_the_shipped_rules_keep_tennis_bracelets_and_me_charms_off_moments() {
+        let rules = crate::Config::built_in().unwrap().rules;
+        let tennis = shipped("590041C01", "Pandora Timeless Pave Single-row Tennis Bracelet", 60.0, &[]);
+        assert_eq!((tennis.kind.as_deref(), tennis.system.as_deref()), (Some("bracelet"), None), "a tennis bracelet takes no charms");
+        let catalog = vec![
+            tennis,
+            shipped("599652C01", "Sparkling Slider Tennis Bracelet", 50.0, &[]),
+            shipped("590702", "Pandora Moments Snake Chain Bracelet", 75.0, &[]),
+            shipped("763369C01", "Pandora ME Cat Mini Dangle Charm", 30.0, &[]),
+            shipped("793448C01", "Gradient Planet Cat Mini Dangle Charm", 35.0, &["NEW - COMPATIBLE WITH ME & MOMENTS"]),
+            shipped("791001", "Lucky Cat Dangle Charm", 50.0, &[]),
+        ];
+        let mom = Recipient { nick: "Mom".into(), likes: vec!["cats".into()], ..Default::default() };
+        let s = suggest(&catalog, &mom, 200.0, None, &rules, 4);
+        assert!(!s.is_empty());
+        for sug in &s {
+            let base = sug.base.as_ref().expect("a bracelet");
+            assert_eq!(base.id, "590702", "only the Moments bracelet is a base: {sug:?}");
+            let ids: Vec<&str> = sug.addons.iter().map(|a| a.id.as_str()).collect();
+            assert!(!ids.contains(&"763369C01"), "an ME-only charm doesn't go on a Moments bracelet: {ids:?}");
+            assert!(ids.contains(&"793448C01"), "the charm labelled ME & Moments does: {ids:?}");
+            let lucky = sug.addons.iter().find(|a| a.id == "791001").unwrap();
+            assert!(lucky.fit_inferred && lucky.why.contains("fit inferred"), "{lucky:?}");
+            assert_eq!(sug.currency, "USD");
+        }
+        // Evaluating a tennis bracelet with a charm says it isn't a charm bracelet.
+        let ev = evaluate(&[(catalog[0].clone(), 1), (catalog[5].clone(), 1)], Some(&mom), None, &rules);
+        assert!(ev.warnings.iter().any(|w| w.text.contains("isn't recognised as a charm bracelet")), "{:?}", ev.warnings);
+        // A Moments bracelet with a charm whose system is only inferred: fit is flagged.
+        let ev = evaluate(&[(catalog[2].clone(), 1), (catalog[5].clone(), 1)], Some(&mom), None, &rules);
+        assert!(ev.warnings.iter().any(|w| w.level == "warn" && w.text.contains("fit inferred")), "{:?}", ev.warnings);
+        assert!(ev.lines[1].system_inferred);
+    }
+
+    #[test]
+    fn old_prices_mixed_currencies_and_misread_list_prices_are_flagged() {
+        let r = rules();
+        let mut old = item("790001", "Cat Charm", 50.0);
+        old.price_at = Some("2026-11-01T10:00:00Z".into());
+        let mut fresh = item("590702", "Pandora Moments Snake Chain Bracelet", 70.0);
+        fresh.price_at = Some("2026-11-14T10:00:00Z".into());
+        let now = crate::time::parse_rfc3339("2026-11-15T10:00:00Z").unwrap();
+        let ev = evaluate_at(&[(fresh.clone(), 1), (old.clone(), 1)], None, None, &r, now);
+        let stale: Vec<&Warning> = ev.warnings.iter().filter(|w| w.text.contains("capture the store again")).collect();
+        assert_eq!(stale.len(), 1, "{:?}", ev.warnings);
+        assert!(stale[0].text.contains("Cat Charm") && stale[0].text.contains("2026-11-01"));
+        assert_eq!(ev.oldest_price_at.as_deref(), Some("2026-11-01T10:00:00Z"));
+        assert_eq!(ev.lines[1].price_at.as_deref(), Some("2026-11-01T10:00:00Z"));
+
+        let mut euro = item("790009", "Euro Charm", 20.0);
+        euro.currency = "EUR".into();
+        let ev = evaluate_at(&[(fresh.clone(), 1), (euro, 1)], None, None, &r, now);
+        assert!(ev.warnings.iter().any(|w| w.level == "stop" && w.text.contains("mixes currencies (EUR and USD)")), "{:?}", ev.warnings);
+
+        // "$812 VALUE" read as the price: the list price can't make the saving negative.
+        let mut set = item("B802000", "Holiday Gift Set", 812.0);
+        set.list_price = Some(399.0);
+        let ev = evaluate_at(&[(set, 1)], None, None, &r, now);
+        assert_eq!((ev.total, ev.list_total, ev.savings), (812.0, 812.0, 0.0));
+    }
+
+    #[test]
+    fn lines_say_which_variant_was_priced() {
+        let r = rules();
+        let v = |id: &str, title: &str, price: f64, available: bool| crate::model::Variant { id: id.into(), title: Some(title.into()), price: Some(price), available: Some(available), ..Default::default() };
+        let mut p = item("590702", "Pandora Moments Snake Chain Bracelet", 70.0);
+        assert_eq!(evaluate(&[(p.clone(), 1)], None, None, &r).lines[0].priced, "the price on the listing");
+        p.variants = vec![v("a", "17 cm", 70.0, true), v("b", "19 cm", 70.0, true)];
+        assert_eq!(evaluate(&[(p.clone(), 1)], None, None, &r).lines[0].priced, "any of its 2 variants (same price)");
+        p.variants = vec![v("a", "17 cm", 80.0, true), v("b", "19 cm", 70.0, true)];
+        let priced = evaluate(&[(p, 1)], None, None, &r).lines[0].priced.clone();
+        assert!(priced.starts_with("19 cm") && priced.contains("differ"), "{priced}");
     }
 }

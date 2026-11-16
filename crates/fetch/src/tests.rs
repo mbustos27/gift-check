@@ -84,7 +84,7 @@ fn page(ids: &[u64]) -> Reply {
 }
 
 fn store() -> StoreCfg {
-    StoreCfg::ad_hoc_shopify("shop.example")
+    StoreCfg::ad_hoc_shopify("shop.example", "USD")
 }
 
 fn rules() -> Rules {
@@ -252,10 +252,175 @@ fn retry_after_values() {
     assert_eq!(retry_after_secs(None, 0), None);
 }
 
+
+/// An in-memory transport for host names a local server can't stand in for (www vs apex).
+struct Fake {
+    routes: std::cell::RefCell<Vec<(String, Vec<Response>)>>,
+    seen: std::cell::RefCell<Vec<String>>,
+}
+
+impl Fake {
+    fn new(routes: Vec<(&str, Vec<Response>)>) -> Fake {
+        Fake { routes: std::cell::RefCell::new(routes.into_iter().map(|(k, v)| (k.to_string(), v)).collect()), seen: Default::default() }
+    }
+}
+
+impl Transport for Fake {
+    fn get(&self, url: &str) -> Result<Response, String> {
+        self.seen.borrow_mut().push(url.to_string());
+        let mut r = self.routes.borrow_mut();
+        Ok(match r.iter_mut().find(|(k, _)| k == url) {
+            Some((_, q)) if q.len() > 1 => q.remove(0),
+            Some((_, q)) => q[0].clone(),
+            None => resp(404, &[], "not found"),
+        })
+    }
+}
+
+fn resp(status: u16, headers: &[(&str, &str)], body: &str) -> Response {
+    Response { status, headers: headers.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(), body: body.into() }
+}
+
+fn fake_page(ids: &[u64]) -> Response {
+    let (status, _, body) = page(ids);
+    resp(status, &[], &body)
+}
+
+const WWW: &str = "https://www.shop.example";
+
+fn run_fake(t: &Fake, db: &Db, clock: &FakeClock) -> RunReport {
+    run_shopify(db, &rules(), &store(), WWW, None, t, clock, &mut |_| {}).unwrap()
+}
+
+#[test]
+fn a_crawl_delay_over_the_cap_stops_before_the_catalog() {
+    let mock = Mock::start(vec![("/robots.txt", vec![(200, vec![], "User-agent: *\nCrawl-delay: 120\n".into())]), ("/products.json?limit=250&page=1", vec![page(&[1])])]);
+    let (db, clock) = (Db::memory().unwrap(), FakeClock::default());
+    let rep = run(&mock, &db, &clock);
+    let stop = rep.stop.unwrap();
+    assert!(stop.contains("asks for 120 s") && stop.contains("60 s"), "{stop}");
+    assert_eq!(mock.urls(), vec!["/robots.txt"], "nothing else was requested");
+    assert!(clock.sleeps.borrow().iter().all(|s| *s <= 3000), "it didn't quietly use 60 s instead: {:?}", clock.sleeps.borrow());
+    // 60 s itself is honoured.
+    let mock = Mock::start(vec![("/robots.txt", vec![(200, vec![], "User-agent: *\nCrawl-delay: 60\n".into())]), ("/products.json?limit=250&page=1", vec![page(&[])])]);
+    let clock = FakeClock::default();
+    let rep = run(&mock, &Db::memory().unwrap(), &clock);
+    assert_eq!(rep.stop, None);
+    assert_eq!(*clock.sleeps.borrow(), vec![60_000]);
+}
+
+#[test]
+fn robots_redirects_are_resolved_properly_and_never_mean_allow_all() {
+    let disallow_all = resp(200, &[], "User-agent: *\nDisallow: /\n");
+    // Protocol-relative to the bare domain, whose robots.txt disallows everything.
+    let t = Fake::new(vec![
+        ("https://www.shop.example/robots.txt", vec![resp(301, &[("Location", "//shop.example/robots.txt")], "")]),
+        ("https://shop.example/robots.txt", vec![disallow_all.clone()]),
+        ("https://www.shop.example/products.json?limit=250&page=1", vec![fake_page(&[1])]),
+    ]);
+    let rep = run_fake(&t, &Db::memory().unwrap(), &FakeClock::default());
+    assert!(rep.stop.as_deref().unwrap().contains("robots.txt does not allow"), "{:?}", rep.stop);
+    assert_eq!(*t.seen.borrow(), vec!["https://www.shop.example/robots.txt", "https://shop.example/robots.txt"]);
+
+    // Relative without a leading slash: resolved against the robots.txt URL.
+    let t = Fake::new(vec![
+        ("https://www.shop.example/robots.txt", vec![resp(302, &[("Location", "robots-main.txt")], "")]),
+        ("https://www.shop.example/robots-main.txt", vec![disallow_all.clone()]),
+        ("https://www.shop.example/products.json?limit=250&page=1", vec![fake_page(&[1])]),
+    ]);
+    let rep = run_fake(&t, &Db::memory().unwrap(), &FakeClock::default());
+    assert!(rep.stop.as_deref().unwrap().contains("robots.txt does not allow"), "{:?}", rep.stop);
+
+    // Redirects that can't be followed stop the run: nothing but robots.txt is requested.
+    for (location, why) in [
+        (None, "without a Location"),
+        (Some("http://www.shop.example/robots.txt"), "https down to http"),
+        (Some("https://robots.other.example/robots.txt"), "another site"),
+        (Some("https://[bad"), "isn't a usable URL"),
+    ] {
+        let headers: Vec<(&str, &str)> = location.map(|l| vec![("Location", l)]).unwrap_or_default();
+        let t = Fake::new(vec![("https://www.shop.example/robots.txt", vec![resp(301, &headers, "")]), ("https://www.shop.example/products.json?limit=250&page=1", vec![fake_page(&[1])])]);
+        let rep = run_fake(&t, &Db::memory().unwrap(), &FakeClock::default());
+        let stop = rep.stop.unwrap_or_default();
+        assert!(stop.contains("could not be read") && stop.contains(why), "{location:?}: {stop}");
+        assert_eq!(t.seen.borrow().len(), 1, "{location:?}: {:?}", t.seen.borrow());
+    }
+
+    // A loop of redirects ends after five.
+    let t = Fake::new(vec![("https://www.shop.example/robots.txt", vec![resp(302, &[("Location", "/robots.txt")], "")])]);
+    let rep = run_fake(&t, &Db::memory().unwrap(), &FakeClock::default());
+    assert!(rep.stop.unwrap().contains("more than 5 redirects"));
+    assert_eq!(t.seen.borrow().len(), 6);
+}
+
 #[test]
 fn redirect_resolution() {
-    assert_eq!(resolve("https://a.example/robots.txt", "/x/robots.txt").as_deref(), Some("https://a.example/x/robots.txt"));
-    assert_eq!(resolve("https://a.example/robots.txt", "https://www.a.example/robots.txt").as_deref(), Some("https://www.a.example/robots.txt"));
-    assert_eq!(resolve("https://a.example/robots.txt", "http://a.example/robots.txt"), None, "no downgrade to http");
-    assert_eq!(resolve("https://a.example/robots.txt", "robots2.txt"), None);
+    assert_eq!(resolve("https://a.example/robots.txt", "/x/robots.txt").as_deref(), Ok("https://a.example/x/robots.txt"));
+    assert_eq!(resolve("https://a.example/robots.txt", "https://www.a.example/robots.txt").as_deref(), Ok("https://www.a.example/robots.txt"));
+    assert_eq!(resolve("https://a.example/dir/robots.txt", "robots2.txt").as_deref(), Ok("https://a.example/dir/robots2.txt"));
+    assert_eq!(resolve("https://www.a.example/robots.txt", "//a.example/r.txt").as_deref(), Ok("https://a.example/r.txt"));
+    assert_eq!(resolve("https://a.example/robots.txt", "../../r.txt").as_deref(), Ok("https://a.example/r.txt"));
+    assert!(resolve("https://a.example/robots.txt", "http://a.example/robots.txt").is_err(), "no downgrade to http");
+    assert!(resolve("https://a.example/robots.txt", "ftp://a.example/robots.txt").is_err());
+    assert!(same_site("https://www.a.example/robots.txt", "https://a.example/robots.txt"));
+    assert!(!same_site("https://a.example/robots.txt", "https://a.example.evil/robots.txt"));
+    assert!(!same_site("https://a.example/robots.txt", "https://a.example:8443/robots.txt"));
+}
+
+#[test]
+fn a_429_on_page_one_and_another_on_page_two_stops_without_a_second_wait() {
+    let mock = Mock::start(vec![
+        robots_ok(),
+        ("/products.json?limit=250&page=1", vec![(429, vec![("Retry-After", "5".into())], "".into()), page(&[1])]),
+        ("/products.json?limit=250&page=2", vec![(429, vec![("Retry-After", "5".into())], "".into()), page(&[])]),
+    ]);
+    let (db, clock) = (Db::memory().unwrap(), FakeClock::default());
+    let rep = run(&mock, &db, &clock);
+    assert!(rep.stop.as_deref().unwrap().contains("a second 429"), "{:?}", rep.stop);
+    assert!(!rep.complete);
+    assert_eq!(rep.products, 1, "page 1 is kept");
+    assert_eq!(clock.sleeps.borrow().iter().filter(|s| **s == 5000).count(), 1, "waited once: {:?}", clock.sleeps.borrow());
+    assert_eq!(mock.urls().iter().filter(|u| u.contains("page=2")).count(), 1, "page 2 was not retried");
+}
+
+#[test]
+fn the_next_run_honours_the_spacing_and_retry_after_of_the_last() {
+    let db = Db::memory().unwrap();
+    let mock = Mock::start(vec![robots_ok(), ("/products.json?limit=250&page=1", vec![page(&[])])]);
+    let first = FakeClock::at(1_000_000);
+    run(&mock, &db, &first);
+    let last = first.now_ms();
+    // A second run one second later waits out the rest of the 3 s before its first request.
+    let second = FakeClock::at(last + 1_000);
+    run(&mock, &db, &second);
+    assert_eq!(second.sleeps.borrow().first(), Some(&2_000), "{:?}", second.sleeps.borrow());
+
+    // A 429 whose Retry-After is longer than gift-check waits: the next run doesn't even start.
+    let mock = Mock::start(vec![robots_ok(), ("/products.json?limit=250&page=1", vec![(429, vec![("Retry-After", "600".into())], "".into())])]);
+    let clock = FakeClock::at(10_000_000);
+    assert!(run(&mock, &db, &clock).stop.unwrap().contains("600 s"));
+    let n = mock.urls().len();
+    let soon = FakeClock::at(clock.now_ms() + 60_000);
+    let rep = run(&mock, &db, &soon);
+    let stop = rep.stop.unwrap();
+    assert!(stop.contains("Retry-After") && stop.contains("not to come back before"), "{stop}");
+    assert_eq!((mock.urls().len(), rep.requests), (n, 0), "no request before the time the store asked for");
+    // After that time it runs again.
+    let later = FakeClock::at(clock.now_ms() + 601_000);
+    assert!(!run(&mock, &db, &later).stop.unwrap_or_default().contains("not to come back"));
+}
+
+#[test]
+fn a_store_that_ignores_the_page_number_stops_the_run() {
+    let db = Db::memory().unwrap();
+    let mock = Mock::start(vec![robots_ok(), ("/products.json?limit=250&page=1", vec![page(&[1, 2])]), ("/products.json?limit=250&page=2", vec![page(&[3])]), ("/products.json?limit=250&page=3", vec![page(&[])])]);
+    run(&mock, &db, &FakeClock::default());
+    // Now every page answers with page 1.
+    let mock = Mock::start(vec![robots_ok(), ("/products.json?limit=250&page=1", vec![page(&[1, 2])]), ("/products.json?limit=250&page=2", vec![page(&[1, 2])])]);
+    let rep = run(&mock, &db, &FakeClock::default());
+    assert!(rep.stop.as_deref().unwrap().contains("ignore the page number"), "{:?}", rep.stop);
+    assert!(!rep.complete);
+    assert_eq!((rep.pages, rep.discontinued), (1, 0));
+    assert!(!db.product("shop.example", "3").unwrap().unwrap().discontinued, "a run that never ended marks nothing gone");
+    assert!(mock.urls().iter().all(|u| !u.contains("page=3")));
 }
