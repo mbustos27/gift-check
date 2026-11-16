@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gift-check bridge</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/bridge.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">✦</span>
+    <span class="name">gift-check bridge</span>
+  </div>
+</header>
+<main>
+  <p id="banner" class="banner" role="status" hidden></p>
+  <div class="split">
+    <div class="card">
+      <h2>1. Open a store from here</h2>
+      <p class="hint">Keep this tab open. A store opened with these buttons can send its listings back to this tab, and only to it. The store tab is a normal tab: sign-ins, carts and checkout are never touched.</p>
+      <div id="stores"></div>
+    </div>
+    <div class="card">
+      <h2>2. Run the capture script in the store tab</h2>
+      <p>In the store tab, run that store's capture script (see <code>capture/README.md</code> in the gift-check folder). It reads the product listings on the page and posts them here in chunks.</p>
+      <p class="hint" id="target"></p>
+      <h2 class="spaced">Received</h2>
+      <ul id="progress" class="progress"><li class="hint" id="waiting">Waiting for a store tab to send listings…</li></ul>
+      <p class="hint" id="ignored" hidden></p>
+    </div>
+  </div>
+</main>
+</body>
+</html>

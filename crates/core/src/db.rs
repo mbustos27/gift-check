@@ -189,6 +189,8 @@ pub struct Query {
     pub words: Vec<String>,
     pub store: Option<String>,
     pub kind: Option<String>,
+    /// Any of these kinds (when `kind` is not set).
+    pub kinds: Option<Vec<String>>,
     pub metal_group: Option<String>,
     /// Only these systems (for "fits this bracelet").
     pub systems: Option<Vec<String>>,
@@ -433,6 +435,11 @@ impl Db {
         Ok((count, gone))
     }
 
+    pub fn set_capture_sources(&self, capture_id: i64, sources: &[String]) -> Result<(), String> {
+        self.conn.execute("UPDATE capture SET sources=?2 WHERE id=?1", params![capture_id, to_json(&sources)]).map_err(e)?;
+        Ok(())
+    }
+
     /// Distinct products a capture has stored so far.
     pub fn capture_count(&self, capture_id: i64) -> Result<i64, String> {
         self.conn.query_row("SELECT COUNT(*) FROM price_obs WHERE capture_id=?1 AND variant_id=''", [capture_id], |r| r.get(0)).map_err(e)
@@ -498,6 +505,14 @@ impl Db {
             if let Some(v) = val.as_ref().filter(|v| !v.is_empty()) {
                 cond.push_str(&format!(" AND {col} = ? COLLATE NOCASE"));
                 args.push(V::Text(v.clone()));
+            }
+        }
+        if let Some(kinds) = q.kinds.as_ref().filter(|_| q.kind.is_none()) {
+            if kinds.is_empty() {
+                cond.push_str(" AND 0");
+            } else {
+                cond.push_str(&format!(" AND kind IN ({})", vec!["?"; kinds.len()].join(",")));
+                args.extend(kinds.iter().map(|k| V::Text(k.clone())));
             }
         }
         if let Some(systems) = &q.systems {

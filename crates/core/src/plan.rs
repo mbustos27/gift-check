@@ -303,6 +303,7 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
             .collect();
         candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| cheaper(&a.0, &b.0)));
         let mut per_kind: std::collections::BTreeMap<String, u32> = Default::default();
+        let mut fit_sources: Vec<String> = Vec::new();
         for (p, _, likes, source) in candidates {
             if addons.len() as u32 >= rules.build.max_addons {
                 break;
@@ -327,11 +328,17 @@ pub fn suggest(catalog: &[Product], r: &Recipient, budget: f64, store: Option<&s
             if let Some(m) = &p.metal_group {
                 why.push(m.clone());
             }
-            why.push(format!("fits {label} (source: {source})"));
+            why.push(format!("fits {label}"));
+            if !fit_sources.contains(&source) {
+                fit_sources.push(source);
+            }
             addons.push((p, why));
         }
 
         let mut notes = Vec::new();
+        for s in &fit_sources {
+            notes.push(format!("Fit rule for the {label} bracelet: {s}"));
+        }
         let base_pick = base.map(|b| {
             let mut why = Vec::new();
             let likes = liked(b, r);
@@ -433,6 +440,7 @@ mod tests {
         let moments = s.iter().find(|x| x.base.as_ref().unwrap().id == "590702").unwrap();
         assert_eq!(moments.addons[0].id, "790001", "the liked cat charm comes first");
         assert!(moments.addons[0].why.contains("matches cats") && moments.addons[0].why.contains("29% off"), "{}", moments.addons[0].why);
+        assert!(moments.notes.iter().any(|n| n.contains("test-moments")), "the fit rule source is cited once: {:?}", moments.notes);
         let refl = s.iter().find(|x| x.base.as_ref().unwrap().id == "597602").unwrap();
         assert_eq!(refl.addons.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec!["797000"], "only Reflexions clips on a Reflexions bracelet");
     }

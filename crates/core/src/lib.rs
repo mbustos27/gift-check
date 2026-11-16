@@ -122,6 +122,36 @@ mod tests {
         assert_eq!(c.stores.image_hosts(), vec!["cdn.shopify.com", "us.pandora.net", "www.hardjewelry.com"]);
     }
 
+    /// The shipped rules on realistic Pandora names.
+    #[test]
+    fn shipped_rules_classify_pandora_products() {
+        let r = Config::built_in().unwrap().rules;
+        let classify = |id: &str, name: &str, badges: &[&str]| {
+            let mut p = model::Product { store: "pandora-us".into(), id: id.into(), name: name.into(), ..Default::default() };
+            if !badges.is_empty() {
+                p.badges = Some(badges.iter().map(|b| b.to_string()).collect());
+            }
+            r.classify(&mut p);
+            (p.kind.unwrap_or_default(), p.system.unwrap_or_default(), p.metal_group.unwrap_or_default())
+        };
+        let s = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+        assert_eq!(classify("590702", "Pandora Moments Snake Chain Bracelet", &[]), s("bracelet", "pandora-moments", "Silver"));
+        assert_eq!(classify("583050C00", "Pandora Moments Heart Clasp Snake Chain Bracelet", &[]), s("bracelet", "pandora-moments", "Rose gold"));
+        assert_eq!(classify("597602", "Pandora Reflexions Mesh Bracelet", &[]), s("bracelet", "pandora-reflexions", "Silver"));
+        assert_eq!(classify("791088", "Band of Hearts Safety Chain Clip Charm", &[]), s("safety-chain", "pandora-moments", "Silver"));
+        assert_eq!(classify("797602", "Sparkling Heart Clip Charm", &[]), s("clip", "pandora-moments", "Silver"));
+        assert_eq!(classify("763369C01", "Pandora ME Anchor Mini Dangle Charm", &[]), s("charm", "pandora-me", "Gold"));
+        assert_eq!(classify("793448C01", "Gradient Planet Mini Dangle Charm", &["NEW - COMPATIBLE WITH ME & MOMENTS"]), s("charm", "pandora-me-moments", "Silver"));
+        assert_eq!(classify("794948C01", "Engagement Ring Dangle Charm", &[]).0, "charm");
+        assert_eq!(classify("190000C01", "Sparkling Halo Ring", &[]).0, "ring");
+        assert_eq!(classify("290000C01", "Heart Hoop Earrings", &[]).0, "earring");
+        assert_eq!(classify("799999", "Mystery", &[]).0, "charm", "style number 7 = charm");
+        assert!(matches!(r.fit(Some("pandora-me-moments"), Some("pandora-moments")), rules::Fit::Yes { .. }));
+        assert!(matches!(r.fit(Some("pandora-me"), Some("pandora-moments")), rules::Fit::No { .. }));
+        assert!(matches!(r.fit(Some("pandora-reflexions"), Some("pandora-moments")), rules::Fit::No { .. }));
+        assert_eq!(r.todo_count(), 0, "every shipped rule is sourced");
+    }
+
     #[test]
     fn fingerprint_changes_with_text() {
         assert_ne!(fingerprint("a"), fingerprint("b"));

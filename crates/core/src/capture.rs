@@ -206,7 +206,7 @@ pub fn validate_value(v: &Value, stores: &Stores, max_products: usize) -> Result
     if complete && products.is_empty() && chunk.as_ref().is_none_or(|k| k.chunks == 1) {
         return Err("a complete capture with no products would mark the whole store discontinued; refusing it".into());
     }
-    Ok(Capture { store: store.id.clone(), origin: store.origin.clone(), captured_at: captured_at.to_string(), complete, sources, products, merged, warnings, chunk })
+    Ok(Capture { store: store.id.clone(), origin: store.origin.clone(), captured_at: crate::time::format_utc(at), complete, sources, products, merged, warnings, chunk })
 }
 
 fn chunk_of(obj: &serde_json::Map<String, Value>) -> Result<Option<Chunk>, String> {
@@ -337,6 +337,41 @@ fn product(v: &Value, store: &StoreCfg) -> Result<Product, String> {
         first_seen: None,
         last_seen: None,
     })
+}
+
+/// What storing a capture did.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Stored {
+    pub capture_id: i64,
+    pub store: String,
+    pub products: i64,
+    pub discontinued: i64,
+    pub complete: bool,
+    pub merged: usize,
+    pub warnings: Vec<String>,
+}
+
+/// The categories a capture covers; a complete capture only speaks for these.
+pub fn categories(products: &[Product]) -> Vec<Option<String>> {
+    let mut out: Vec<Option<String>> = Vec::new();
+    for p in products {
+        if !out.contains(&p.category) {
+            out.push(p.category.clone());
+        }
+    }
+    out
+}
+
+/// Stores a whole validated capture as one capture row (used by `import`).
+pub fn store(db: &crate::db::Db, cfg: &crate::Config, c: &Capture, source: &str) -> Result<Stored, String> {
+    let s = cfg.stores.get(&c.store).ok_or_else(|| format!("unknown store {}", c.store))?;
+    db.upsert_store(s)?;
+    let id = db.begin_capture(&c.store, source, None, Some(&c.captured_at), &c.sources)?;
+    db.store_products(id, &c.captured_at, &c.products, &cfg.rules)?;
+    let scope = if c.complete { crate::db::Scope::Categories(categories(&c.products)) } else { crate::db::Scope::None };
+    let note = (!c.warnings.is_empty()).then(|| c.warnings.join("; "));
+    let (products, discontinued) = db.finish_capture(id, c.complete, &scope, note.as_deref())?;
+    Ok(Stored { capture_id: id, store: c.store.clone(), products, discontinued, complete: c.complete, merged: c.merged, warnings: c.warnings.clone() })
 }
 
 /// Merges a later sighting of the same product into the first one: the first sighting's values
@@ -543,6 +578,38 @@ mod tests {
         assert_eq!(c.chunk, Some(Chunk { capture_id: "abcdefgh12".into(), chunk: 1, chunks: 3 }));
         v["chunk"] = json!(4);
         assert!(validate_value(&v, &stores(), MAX_CHUNK_PRODUCTS).is_err());
+    }
+
+    #[test]
+    fn importing_twice_keeps_history_and_complete_false_discontinues_nothing() {
+        let cfg = crate::Config::built_in().unwrap();
+        let db = crate::db::Db::memory().unwrap();
+        let mut v = good();
+        let mut other = v["products"][0].clone();
+        other["id"] = json!("791088");
+        other["name"] = json!("Band of Hearts Safety Chain Clip Charm");
+        v["products"].as_array_mut().unwrap().push(other);
+        let first = store(&db, &cfg, &check(v.clone()).unwrap(), "import").unwrap();
+        assert_eq!((first.products, first.discontinued), (2, 0));
+        assert_eq!(db.product("pandora-us", "791088").unwrap().unwrap().kind.as_deref(), Some("charm"), "the capture said charm");
+
+        // A later partial capture that lacks 791088 and has a new price.
+        let mut later = good();
+        later["complete"] = json!(false);
+        later["captured_at"] = json!("2026-11-15T18:00:00+01:00");
+        later["products"][0]["price"] = json!(58.0);
+        let second = store(&db, &cfg, &check(later.clone()).unwrap(), "import").unwrap();
+        assert_eq!((second.products, second.discontinued), (1, 0));
+        assert!(!db.product("pandora-us", "791088").unwrap().unwrap().discontinued, "complete:false marks nothing missing");
+        let h = db.history("pandora-us", "794948C01").unwrap();
+        assert_eq!(h.iter().map(|o| o.price).collect::<Vec<_>>(), vec![Some(68.0), Some(58.0)]);
+        assert_eq!(h[1].at, "2026-11-15T17:00:00Z", "times are stored as UTC");
+
+        // The same capture complete: now the missing charm is marked.
+        later["complete"] = json!(true);
+        let third = store(&db, &cfg, &check(later).unwrap(), "import").unwrap();
+        assert_eq!(third.discontinued, 1);
+        assert!(db.product("pandora-us", "791088").unwrap().unwrap().discontinued);
     }
 
     #[test]

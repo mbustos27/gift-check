@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gift-check</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">✦</span>
+    <span class="name">gift-check</span>
+    <span id="version" class="pill"></span>
+  </div>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button role="tab" id="tab-catalog" aria-controls="panel-catalog" aria-selected="true">Catalog</button>
+    <button role="tab" id="tab-build" aria-controls="panel-build" aria-selected="false">Build a gift</button>
+    <button role="tab" id="tab-compare" aria-controls="panel-compare" aria-selected="false">Compare</button>
+    <button role="tab" id="tab-recipients" aria-controls="panel-recipients" aria-selected="false">Recipients</button>
+    <button role="tab" id="tab-captures" aria-controls="panel-captures" aria-selected="false">Captures</button>
+  </nav>
+</header>
+
+<main>
+  <p id="banner" class="banner" role="status" hidden></p>
+
+  <!-- CATALOG -->
+  <section id="panel-catalog" role="tabpanel" aria-labelledby="tab-catalog">
+    <form id="filters" class="card filters" autocomplete="off">
+      <label class="grow">Search <input id="f-q" type="search" placeholder="cat, heart, snake chain, 794948C01…"></label>
+      <label>Store <select id="f-store"><option value="">All stores</option></select></label>
+      <label>Kind <select id="f-kind"><option value="">Any kind</option></select></label>
+      <label>Metal <select id="f-metal"><option value="">Any metal</option></select></label>
+      <label class="small">Min $ <input id="f-min" type="number" min="0" step="1" inputmode="decimal"></label>
+      <label class="small">Max $ <input id="f-max" type="number" min="0" step="1" inputmode="decimal"></label>
+      <label>Sort
+        <select id="f-sort">
+          <option value="price">Price, low first</option>
+          <option value="price-desc">Price, high first</option>
+          <option value="off">Biggest % off</option>
+          <option value="newest">Newest captured</option>
+          <option value="name">Name</option>
+        </select>
+      </label>
+      <div class="checks">
+        <label class="check"><input id="f-sale" type="checkbox"> On sale</label>
+        <label class="check"><input id="f-stock" type="checkbox"> In stock</label>
+      </div>
+    </form>
+    <p id="results-count" class="hint" aria-live="polite"></p>
+    <ul id="results" class="rows"></ul>
+    <div class="actions"><button type="button" id="more" class="secondary" hidden>Show more</button></div>
+  </section>
+
+  <!-- BUILD A GIFT -->
+  <section id="panel-build" role="tabpanel" aria-labelledby="tab-build" hidden>
+    <div class="split">
+      <div>
+        <div class="card">
+          <h2>Who and how much</h2>
+          <div class="grid">
+            <label>Recipient <select id="b-recipient"><option value="">No one in particular</option></select></label>
+            <label>Budget ($) <input id="b-budget" type="number" min="0" step="1" inputmode="decimal"></label>
+            <label>Store <select id="b-store"><option value="">All stores</option></select></label>
+          </div>
+          <div class="actions">
+            <button type="button" id="b-suggest" class="primary">Suggest gifts</button>
+            <span id="b-suggest-note" class="hint inline"></span>
+          </div>
+          <div id="b-suggestions"></div>
+        </div>
+
+        <div class="card">
+          <h2>1. Bracelet</h2>
+          <div class="row"><input id="b-base-q" type="search" placeholder="Search bracelets"></div>
+          <ul id="b-bases" class="rows compact"></ul>
+        </div>
+
+        <div class="card">
+          <h2>2. Charms, clips and the rest</h2>
+          <p id="b-fits" class="hint"></p>
+          <div class="row"><input id="b-addon-q" type="search" placeholder="Search add-ons"></div>
+          <ul id="b-addons" class="rows compact"></ul>
+        </div>
+      </div>
+
+      <div class="card result" id="plan-card">
+        <h2>The gift</h2>
+        <label class="narrow">Plan name <input id="p-name" placeholder="e.g. Mom, Christmas"></label>
+        <ul id="p-lines" class="lines"></ul>
+        <div id="p-totals" class="totals"></div>
+        <div id="p-size"></div>
+        <ul id="p-warnings" class="warnings"></ul>
+        <div class="actions">
+          <button type="button" id="p-save" class="primary">Save plan</button>
+          <button type="button" id="p-clear" class="secondary">Start over</button>
+          <span id="p-saved" class="hint inline" aria-live="polite"></span>
+        </div>
+        <details id="p-notes-box" hidden><summary>Notes from the rules</summary><ul id="p-notes" class="plain small-text"></ul></details>
+        <h3 class="sub">Saved plans</h3>
+        <ul id="plans" class="plain"></ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- COMPARE -->
+  <section id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" hidden>
+    <div class="card">
+      <div class="grid">
+        <label>Compare by
+          <select id="c-by"><option value="store">Store</option><option value="category">Category</option></select>
+        </label>
+        <label>A <select id="c-a"></select></label>
+        <label>B <select id="c-b"></select></label>
+      </div>
+      <p class="hint">Prices now, per kind of product, discontinued items left out.</p>
+      <div class="tablewrap"><table id="c-table"></table></div>
+    </div>
+  </section>
+
+  <!-- RECIPIENTS -->
+  <section id="panel-recipients" role="tabpanel" aria-labelledby="tab-recipients" hidden>
+    <div class="split">
+      <div class="card">
+        <h2>People</h2>
+        <p class="hint">A nickname is all gift-check needs.</p>
+        <ul id="r-list" class="plain"></ul>
+        <div class="actions"><button type="button" id="r-new" class="secondary">Add someone</button></div>
+      </div>
+      <form id="r-form" class="card" autocomplete="off">
+        <h2 id="r-title">Add someone</h2>
+        <div class="grid">
+          <label>Nickname <input id="r-nick" required maxlength="40"></label>
+          <label>Wrist (cm) <input id="r-wrist" type="number" min="8" max="30" step="0.5" inputmode="decimal"></label>
+          <label>Metal they like <select id="r-metal"><option value="">No preference</option></select></label>
+          <label>Budget ($) <input id="r-budget" type="number" min="0" step="1" inputmode="decimal"></label>
+          <label class="wide">Likes and themes <input id="r-likes" placeholder="cats, travel, stars (comma separated)"></label>
+        </div>
+        <fieldset>
+          <legend>Bracelet systems or brands they already have</legend>
+          <div id="r-systems" class="checkgrid"></div>
+          <label class="wide">Others <input id="r-systems-other" placeholder="comma separated"></label>
+        </fieldset>
+        <fieldset>
+          <legend>Things they already own</legend>
+          <label class="wide">One per line, as store:id <textarea id="r-owned" rows="4" placeholder="pandora-us:794948C01"></textarea></label>
+          <p class="hint">Tip: the History button on a product shows its store:id.</p>
+        </fieldset>
+        <label class="wide">Notes <textarea id="r-notes" rows="3"></textarea></label>
+        <div class="actions">
+          <button type="submit" class="primary">Save</button>
+          <span id="r-msg" class="hint inline" aria-live="polite"></span>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <!-- CAPTURES -->
+  <section id="panel-captures" role="tabpanel" aria-labelledby="tab-captures" hidden>
+    <div class="card">
+      <h2>Stores</h2>
+      <ul id="s-list" class="stores"></ul>
+      <div id="fetch-status" class="fetchlog" aria-live="polite" hidden></div>
+    </div>
+    <div class="card">
+      <h2>Browser capture</h2>
+      <p>Stores behind a bot check are read in your own browser. Open the bridge, open the store from it, then run the store's capture script in that tab. The bridge receives the listings and stores them here.</p>
+      <div class="actions"><a class="button primary" href="/bridge" target="_blank">Open the bridge</a></div>
+    </div>
+    <div class="card">
+      <h2>Captures and fetches</h2>
+      <div class="tablewrap"><table id="cap-table"></table></div>
+      <p id="paths" class="hint"></p>
+    </div>
+  </section>
+</main>
+
+<dialog id="detail" aria-labelledby="d-name">
+  <div class="dialog-head">
+    <h2 id="d-name"></h2>
+    <button type="button" id="d-close" class="x" aria-label="Close">✕</button>
+  </div>
+  <div id="d-body"></div>
+</dialog>
+</body>
+</html>
